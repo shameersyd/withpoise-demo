@@ -1,0 +1,199 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Tracing the instructor</title>
+<style>
+  body { font: 13px/1.5 ui-monospace, Menlo, monospace; background: #0b0b0c; color: #ddd;
+         margin: 0; padding: 20px; }
+  #bar { height: 3px; background: #222; margin: 12px 0; }
+  #fill { height: 100%; width: 0; background: #3DD68C; }
+  video, canvas { max-width: 360px; display: block; margin-top: 12px; border: 1px solid #333; }
+</style>
+<body>
+<div id="log">starting…</div>
+<div id="bar"><div id="fill"></div></div>
+<video id="video" src="/media/instructor.mp4" preload="auto" muted playsinline></video>
+<canvas id="frame" width="640" height="360"></canvas>
+
+<script type="module">
+/**
+ * Detect the instructor's pose across the whole video, once, offline.
+ *
+ * The demo plays a fixed recording, so there is no reason to spend a phone's
+ * inference budget re-deriving the instructor's pose thirty times a second at
+ * runtime. It is the same every time it is played. Traced here into a timeline
+ * the app looks up by video time, it costs nothing live — which leaves the
+ * entire budget for the user, who is the half that actually changes.
+ *
+ * Run through tools/trace-instructor.py. Uses the heavy model: this happens
+ * once, on a laptop, and the result is the reference every user is judged
+ * against, so accuracy is worth more than speed here.
+ */
+import { PoseLandmarker, FilesetResolver }
+  from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/vision_bundle.mjs";
+
+// A module worker has no working importScripts and MediaPipe's wasm glue calls
+// it. This page is not a worker, so it does not need the shim the app does.
+const WASM = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm";
+const MODEL = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/" +
+              "pose_landmarker_heavy/float16/1/pose_landmarker_heavy.task";
+
+// Which landmarks are worth storing. The app scores thirteen; the other twenty
+// are faces and fingers it never looks at, and they would triple the file.
+/**
+ * The index of the largest body on screen — the one nearest the camera.
+ *
+ * Measured on the torso rather than the full bounding box, because an arm
+ * flung out or a leg lifted changes a bounding box far more than it changes
+ * how close somebody is standing.
+ */
+function chooseInstructor(people) {
+  let best = 0, bestSize = -1;
+  people.forEach((landmarks, i) => {
+    const hip = { x: (landmarks[23].x + landmarks[24].x) / 2,
+                  y: (landmarks[23].y + landmarks[24].y) / 2 };
+    const shoulder = { x: (landmarks[11].x + landmarks[12].x) / 2,
+                       y: (landmarks[11].y + landmarks[12].y) / 2 };
+    const torso = Math.hypot(shoulder.x - hip.x, shoulder.y - hip.y);
+    const shoulders = Math.hypot(landmarks[11].x - landmarks[12].x,
+                                 landmarks[11].y - landmarks[12].y);
+    const size = torso + shoulders;
+    if (size > bestSize) { bestSize = size; best = i; }
+  });
+  return best;
+}
+
+const KEEP = {
+  nose: 0, left_shoulder: 11, right_shoulder: 12, left_elbow: 13, right_elbow: 14,
+  left_wrist: 15, right_wrist: 16, left_hip: 23, right_hip: 24,
+  left_knee: 25, right_knee: 26, left_ankle: 27, right_ankle: 28,
+};
+const NAMES = Object.keys(KEEP);
+
+const params = new URLSearchParams(location.search);
+const FPS = Number(params.get("fps") || 6);
+const FROM = Number(params.get("from") || 0);
+const TO = Number(params.get("to") || 0);          // 0 = to the end
+const CHUNK = Number(params.get("chunk") || 150);  // frames per POST
+
+const video = document.getElementById("video");
+const canvas = document.getElementById("frame");
+const ctx = canvas.getContext("2d", { willReadFrequently: true });
+const logEl = document.getElementById("log");
+const fillEl = document.getElementById("fill");
+
+const say = (text) => { logEl.textContent = text; };
+const post = (body) => fetch("/__trace", {
+  method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+});
+
+const seekTo = (t) => new Promise((resolve, reject) => {
+  const done = () => { cleanup(); resolve(); };
+  const failed = () => { cleanup(); reject(new Error("seek failed at " + t)); };
+  const cleanup = () => {
+    video.removeEventListener("seeked", done);
+    video.removeEventListener("error", failed);
+  };
+  video.addEventListener("seeked", done, { once: true });
+  video.addEventListener("error", failed, { once: true });
+  video.currentTime = t;
+});
+
+const round = (n, places) => Math.round(n * 10 ** places) / 10 ** places;
+
+async function main() {
+  say("waiting for the video…");
+  if (video.readyState < 1) {
+    await new Promise((r) => video.addEventListener("loadedmetadata", r, { once: true }));
+  }
+  const duration = video.duration;
+  const until = TO > 0 ? Math.min(TO, duration) : duration;
+
+  say(`loading the landmarker (heavy, ~29 MB)…`);
+  const vision = await FilesetResolver.forVisionTasks(WASM);
+  let landmarker;
+  try {
+    landmarker = await PoseLandmarker.createFromOptions(vision, {
+      baseOptions: { modelAssetPath: MODEL, delegate: "GPU" },
+      runningMode: "VIDEO", numPoses: 2,
+      minPoseDetectionConfidence: 0.5, minPosePresenceConfidence: 0.5,
+      minTrackingConfidence: 0.5,
+    });
+  } catch {
+    landmarker = await PoseLandmarker.createFromOptions(vision, {
+      baseOptions: { modelAssetPath: MODEL, delegate: "CPU" },
+      runningMode: "VIDEO", numPoses: 2,
+    });
+  }
+
+  await post({ kind: "begin", fps: FPS, duration, from: FROM, to: until, landmarks: NAMES });
+
+  const step = 1 / FPS;
+  let pending = [];
+  let index = 0;
+  let detected = 0;
+  const started = performance.now();
+
+  for (let t = FROM; t < until; t += step, index++) {
+    await seekTo(t);
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const result = landmarker.detectForVideo(canvas, Math.round(t * 1000) + index);
+
+    const row = { t: round(t, 3) };
+    if (result && result.landmarks && result.landmarks.length) {
+      // Which of the people on screen is the instructor?
+      //
+      // This class is filmed with two people on two mats: the teacher, who
+      // speaks, and a student following along beside them. Tracking the wrong
+      // one would make every correction nonsense, and tracking whichever one
+      // the detector happened to rank first would make it nonsense
+      // intermittently, which is worse.
+      //
+      // The teacher is the one nearer the camera — placed there so viewers can
+      // see them — so the largest body in frame is the right pick, and it holds
+      // whichever side of the mat they stand on. Verified against this video:
+      // the chosen body is on the right in 7629 of 7639 frames, and the ten
+      // exceptions are in the opening seconds where the teacher is a talking
+      // head and fails the measurability test anyway.
+      //
+      // Before this the detector was asked for one pose and silently returned
+      // its own choice, which happened to be the same body. That was luck.
+      const pick = chooseInstructor(result.landmarks);
+      detected++;
+      const image = result.landmarks[pick];
+      const world = (result.worldLandmarks && result.worldLandmarks[pick]) || null;
+      // Flat arrays, fixed order, modest precision. Objects and keys would
+      // triple the size of a file the browser has to parse before anything
+      // can be drawn.
+      row.i = NAMES.flatMap((n) => [round(image[KEEP[n]].x, 4), round(image[KEEP[n]].y, 4)]);
+      row.v = NAMES.map((n) => round(image[KEEP[n]].visibility ?? 1, 2));
+      row.w = world
+        ? NAMES.flatMap((n) => [round(world[KEEP[n]].x, 4), round(world[KEEP[n]].y, 4),
+                                round(world[KEEP[n]].z, 4)])
+        : null;
+    }
+    pending.push(row);
+
+    if (pending.length >= CHUNK) {
+      await post({ kind: "frames", frames: pending });
+      pending = [];
+      const through = (t - FROM) / (until - FROM);
+      const rate = index / ((performance.now() - started) / 1000);
+      fillEl.style.width = `${(through * 100).toFixed(1)}%`;
+      say(`${(t).toFixed(0)}s of ${until.toFixed(0)}s · ${index} frames · ` +
+          `${detected} with a body · ${rate.toFixed(1)} fps · ` +
+          `${(((until - t) / step) / rate / 60).toFixed(1)} min left`);
+    }
+  }
+
+  if (pending.length) await post({ kind: "frames", frames: pending });
+  await post({ kind: "end", frames: index, detected });
+  say(`done — ${index} frames, ${detected} with a body`);
+  document.title = "TRACE COMPLETE";
+}
+
+main().catch(async (err) => {
+  say("FAILED: " + err.message);
+  await post({ kind: "error", message: String(err && err.message || err) });
+  document.title = "TRACE FAILED";
+});
+</script>

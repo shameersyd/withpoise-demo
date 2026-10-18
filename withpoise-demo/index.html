@@ -1,0 +1,1724 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#08090A">
+  <meta name="description" content="Posture guidance over a live yoga class">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <link rel="manifest" href="manifest.json">
+  <title>withpoise</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    /* ─────────────────────────────────────────────────────────
+       Tokens
+
+       The class fills the screen, so the interface is almost entirely absent.
+       What little there is sits on dark glass and gets out of the way. The
+       only saturated colour belongs to the armature, which is the one thing
+       on screen carrying information about the user's body.
+       ───────────────────────────────────────────────────────── */
+    :root {
+      --bg: #08090A;
+      --surface: #16181C;
+      --surface-2: #22252B;
+      --line: rgba(255,255,255,0.10);
+      --text-1: #F4F5F7;
+      --text-2: #9A9CA5;
+      --text-3: #63656E;
+      --accent: #FFFFFF;
+      --on-accent: #08090A;
+
+      /* The armature, straight from the mocks. */
+      --reference: #0C0D10;      /* the instructor: near-black, white-haloed */
+      --wrong: #FF3B3B;
+      --right: #35D07F;
+
+      --r-sm: 10px;
+      --r-md: 14px;
+      --r-full: 999px;
+      --font: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      --ease: cubic-bezier(0.22, 1, 0.36, 1);
+      --safe-t: max(14px, env(safe-area-inset-top));
+      --safe-b: max(14px, env(safe-area-inset-bottom));
+    }
+
+    html, body {
+      width: 100%; height: 100%; overflow: hidden;
+      background: var(--bg); color: var(--text-1);
+      font-family: var(--font); font-size: 15px; line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    .icon { width: 22px; height: 22px; fill: none; stroke: currentColor;
+            stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; display: block; }
+    .icon-lg { width: 30px; height: 30px; stroke-width: 1.4; }
+
+    .screen { position: fixed; inset: 0; display: none; flex-direction: column; }
+    .screen.active { display: flex; }
+
+    .btn {
+      display: inline-flex; align-items: center; justify-content: center; gap: 9px;
+      border: none; border-radius: var(--r-sm); cursor: pointer;
+      font-family: var(--font); font-size: 16px; font-weight: 600;
+      letter-spacing: -0.01em; padding: 15px 22px;
+      transition: transform 0.15s var(--ease), opacity 0.15s var(--ease);
+    }
+    .btn:active { transform: scale(0.975); opacity: 0.9; }
+    .btn-primary { background: var(--accent); color: var(--on-accent); }
+    .btn-quiet { background: var(--surface-2); color: var(--text-1); border: 1px solid var(--line); }
+    .btn-block { display: flex; width: 100%; }
+
+    /* ── Start ── */
+    #screen-start {
+      align-items: center; justify-content: center;
+      padding: var(--safe-t) 24px var(--safe-b);
+    }
+    .start-inner { width: 100%; max-width: 420px; text-align: left; }
+    .wordmark {
+      font-size: 13px; font-weight: 600; letter-spacing: 0.18em;
+      text-transform: uppercase; color: var(--text-3); margin-bottom: 26px;
+    }
+    .start-inner h1 {
+      font-size: 30px; font-weight: 680; letter-spacing: -0.03em; line-height: 1.15;
+    }
+    .start-inner p {
+      color: var(--text-2); font-size: 15px; margin-top: 12px; line-height: 1.6;
+    }
+    .start-note {
+      display: flex; gap: 11px; align-items: flex-start;
+      margin-top: 22px; font-size: 13.5px; color: var(--text-3); line-height: 1.5;
+    }
+    .start-note .icon { margin-top: 1px; flex-shrink: 0; }
+    #btn-start { margin-top: 30px; }
+    #start-error {
+      display: none; margin-top: 18px; padding: 14px 16px;
+      background: rgba(255,59,59,0.08); border: 1px solid rgba(255,59,59,0.25);
+      border-radius: var(--r-sm); font-size: 13.5px; color: #FFB4B4; line-height: 1.55;
+    }
+    #start-error.visible { display: block; }
+
+    /* ── The class ── */
+    #screen-class { background: #000; align-items: center; justify-content: center; }
+
+    /* The stage is the video's box, exactly. Sizing it by aspect ratio means
+       normalised landmark coordinates map linearly onto it and the overlay can
+       never drift from the picture — the failure that cost this project a week
+       the first time round. */
+    #stage {
+      position: relative; width: 100%; max-width: 100vw;
+      aspect-ratio: 16 / 9; max-height: 100vh;
+      overflow: hidden; background: #000;
+      transform-origin: 50% 50%;
+      transition: transform 0.55s var(--ease);
+      will-change: transform;
+    }
+    #class-video, #overlay {
+      position: absolute; inset: 0; width: 100%; height: 100%; display: block;
+    }
+    #class-video { object-fit: cover; }
+    #overlay { pointer-events: none; }
+
+    /* The user's camera is never shown. It exists only to be read. */
+    #self-video {
+      position: absolute; width: 2px; height: 2px;
+      opacity: 0; pointer-events: none; top: 0; left: 0;
+    }
+
+    /* ── Chrome over the class ── */
+    #caption {
+      position: absolute; left: 50%; bottom: calc(var(--safe-b) + 6px);
+      transform: translate(-50%, 14px);
+      max-width: min(560px, 86vw);
+      padding: 12px 22px; border-radius: var(--r-full);
+      background: rgba(255,255,255,0.96); color: #121318;
+      font-size: 16px; font-weight: 600; letter-spacing: -0.01em;
+      text-align: center; box-shadow: 0 10px 30px -8px rgba(0,0,0,0.55);
+      opacity: 0; pointer-events: none; z-index: 20;
+      transition: opacity 0.3s var(--ease), transform 0.3s var(--ease);
+    }
+    #caption.visible { opacity: 1; transform: translate(-50%, 0); }
+
+    #playpause {
+      position: absolute; left: calc(var(--safe-b) + 6px); bottom: calc(var(--safe-b) + 6px);
+      width: 58px; height: 58px; border-radius: var(--r-full);
+      background: rgba(10,11,13,0.35); border: 2px solid rgba(255,255,255,0.92);
+      color: #fff; display: flex; align-items: center; justify-content: center;
+      cursor: pointer; z-index: 20; backdrop-filter: blur(8px);
+      opacity: 0; pointer-events: none;
+      transition: opacity 0.3s var(--ease), transform 0.15s var(--ease);
+    }
+    #playpause.visible { opacity: 1; pointer-events: auto; }
+    #playpause:active { transform: scale(0.94); }
+
+    #class-chrome {
+      position: absolute; top: 0; right: 0;
+      display: flex; gap: 8px; padding: var(--safe-t) 14px 0 0; z-index: 20;
+    }
+    .icon-btn {
+      width: 40px; height: 40px; border-radius: var(--r-full);
+      background: rgba(12,13,16,0.5); backdrop-filter: blur(12px);
+      border: 1px solid rgba(255,255,255,0.12); color: var(--text-1);
+      display: flex; align-items: center; justify-content: center; cursor: pointer;
+      transition: background 0.15s var(--ease), opacity 0.15s var(--ease);
+    }
+    .icon-btn:active { background: rgba(40,42,48,0.75); }
+    .icon-btn.off { color: var(--text-3); }
+
+    /* A quiet mark that the tracker is awake, so a user whose camera failed is
+       not left wondering why nothing ever happens. */
+    #tracking-dot {
+      position: absolute; top: var(--safe-t); left: 16px; z-index: 20;
+      display: flex; align-items: center; gap: 7px;
+      font-size: 11px; font-weight: 600; letter-spacing: 0.08em;
+      text-transform: uppercase; color: rgba(255,255,255,0.55);
+      text-shadow: 0 1px 6px rgba(0,0,0,0.7);
+      opacity: 0; transition: opacity 0.4s var(--ease);
+    }
+    #tracking-dot.visible { opacity: 1; }
+    #tracking-dot i {
+      width: 7px; height: 7px; border-radius: 50%; background: var(--right);
+      box-shadow: 0 0 8px rgba(53,208,127,0.8);
+    }
+    #tracking-dot.searching i { background: #F5B544; box-shadow: 0 0 8px rgba(245,181,68,0.8); }
+
+    #debug {
+      position: absolute; left: 12px; bottom: 12px; z-index: 40; margin: 0;
+      padding: 8px 10px; border-radius: 8px; max-width: calc(100% - 24px);
+      background: rgba(8,9,10,0.82); color: #C9CBD4; pointer-events: none;
+      font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      white-space: pre-wrap; backdrop-filter: blur(4px);
+    }
+
+    /* Before the class begins: present, clearly not watching yet, not alarming.
+       A muted dot with a slow pulse, because a static grey dot reads as broken
+       and an amber one reads as a problem the user is supposed to fix. */
+    #tracking-dot.waiting i {
+      background: var(--text-3); box-shadow: none;
+      animation: breathe 2.6s ease-in-out infinite;
+    }
+    @keyframes breathe { 0%, 100% { opacity: 0.35; } 50% { opacity: 0.9; } }
+    @media (prefers-reduced-motion: reduce) {
+      #tracking-dot.waiting i { animation: none; opacity: 0.6; }
+    }
+
+    #loading {
+      position: absolute; inset: 0; z-index: 30;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      gap: 16px; background: rgba(8,9,10,0.82); backdrop-filter: blur(6px);
+      font-size: 14px; color: var(--text-2); text-align: center; padding: 24px;
+    }
+    #loading.hidden { display: none; }
+    .spinner {
+      width: 30px; height: 30px; border: 2px solid rgba(255,255,255,0.12);
+      border-top-color: var(--text-1); border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    #loading-bar { width: min(220px, 60vw); height: 3px; border-radius: var(--r-full);
+                   background: rgba(255,255,255,0.12); overflow: hidden; }
+    #loading-fill { height: 100%; width: 0%; background: var(--text-1);
+                    transition: width 0.25s var(--ease); }
+
+    /* ── First-run notice ── */
+    #safety {
+      position: fixed; inset: 0; z-index: 60; display: none;
+      align-items: flex-end; justify-content: center; padding: 16px;
+      background: rgba(4,5,6,0.72); backdrop-filter: blur(12px);
+    }
+    #safety.visible { display: flex; }
+    .safety-card {
+      max-width: 440px; width: 100%; background: var(--surface);
+      border: 1px solid var(--line); border-radius: 20px;
+      padding: 26px 22px calc(18px + var(--safe-b));
+      box-shadow: 0 20px 50px -12px rgba(0,0,0,0.7);
+    }
+    .safety-card h2 { font-size: 20px; font-weight: 660; letter-spacing: -0.02em; margin-bottom: 12px; }
+    .safety-card p { font-size: 14.5px; line-height: 1.6; color: var(--text-2); margin-bottom: 11px; }
+    .safety-card p strong { color: var(--text-1); font-weight: 600; }
+    #btn-safety-ok { margin-top: 16px; }
+    @media (min-width: 640px) { #safety { align-items: center; } }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+    }
+  </style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4.8v14.4L19.5 12z" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="i-pause" viewBox="0 0 24 24"><path d="M8.5 5v14M15.5 5v14" stroke-width="2.4"/></symbol>
+  <symbol id="i-sound-on" viewBox="0 0 24 24"><path d="M4 9.5h3.2L12 5.8v12.4L7.2 14.5H4z"/><path d="M16.2 9.2a4 4 0 0 1 0 5.6M18.9 6.5a7.8 7.8 0 0 1 0 11"/></symbol>
+  <symbol id="i-sound-off" viewBox="0 0 24 24"><path d="M4 9.5h3.2L12 5.8v12.4L7.2 14.5H4z"/><path d="M16.5 9.8l5 4.4M21.5 9.8l-5 4.4"/></symbol>
+  <symbol id="i-flip" viewBox="0 0 24 24"><path d="M3.6 12a8.4 8.4 0 0 1 14.1-6.2l2.3 2.1"/><path d="M20.4 3.9v4.2h-4.2"/><path d="M20.4 12a8.4 8.4 0 0 1-14.1 6.2L4 16.1"/><path d="M3.6 20.1v-4.2h4.2"/></symbol>
+  <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+  <symbol id="i-camera" viewBox="0 0 24 24"><path d="M3 8.5h3.2l1.6-2.4h8.4l1.6 2.4H21v10H3z"/><circle cx="12" cy="13" r="3.4"/></symbol>
+</svg>
+
+<!-- ═══════════ START ═══════════ -->
+<div class="screen active" id="screen-start">
+  <div class="start-inner">
+    <div class="wordmark">withpoise</div>
+    <h1>Yoga Daily Workout<br>for a Flat Belly</h1>
+    <p>A 20-minute routine with Saurabh Bothra. Follow along — we'll watch your
+       posture and step in only when something needs fixing.</p>
+    <div class="start-note">
+      <svg class="icon"><use href="#i-camera"/></svg>
+      <span>Your camera stays on this device and is never shown on screen. It is
+            only used to compare your posture with the instructor's.</span>
+    </div>
+    <button class="btn btn-primary btn-block" id="btn-start">
+      <svg class="icon"><use href="#i-play"/></svg>Start the class
+    </button>
+    <div id="start-error"></div>
+  </div>
+</div>
+
+<!-- ═══════════ THE CLASS ═══════════ -->
+<div class="screen" id="screen-class">
+  <div id="stage">
+    <video id="class-video" src="media/instructor.mp4" playsinline preload="auto"></video>
+    <canvas id="overlay"></canvas>
+
+    <div id="tracking-dot"><i></i><span id="tracking-label">Tracking</span></div>
+    <!-- Shown only with ?debug=1. See the comment at updateDebug. -->
+    <pre id="debug" hidden></pre>
+    <div id="class-chrome">
+      <button class="icon-btn" id="btn-sound" title="Spoken guidance" aria-label="Spoken guidance">
+        <svg class="icon"><use href="#i-sound-on" id="sound-icon"/></svg>
+      </button>
+      <button class="icon-btn" id="btn-flip" title="Flip camera" aria-label="Flip camera">
+        <svg class="icon"><use href="#i-flip"/></svg>
+      </button>
+      <button class="icon-btn" id="btn-exit" title="End the class" aria-label="End the class">
+        <svg class="icon"><use href="#i-close"/></svg>
+      </button>
+    </div>
+
+    <button id="playpause" aria-label="Play or pause">
+      <svg class="icon icon-lg"><use href="#i-play" id="playpause-icon"/></svg>
+    </button>
+    <div id="caption"></div>
+
+    <div id="loading">
+      <div class="spinner"></div>
+      <div id="loading-text">Getting ready…</div>
+      <div id="loading-bar"><div id="loading-fill"></div></div>
+    </div>
+  </div>
+  <video id="self-video" autoplay playsinline muted></video>
+</div>
+
+<!-- ═══════════ FIRST-RUN NOTICE ═══════════ -->
+<div id="safety">
+  <div class="safety-card">
+    <h2>Before you start</h2>
+    <p>This watches the shape you make and compares it to your instructor's.
+       That is all it does — it can't see pain, and it knows nothing about your
+       body, your injuries or your day.</p>
+    <p><strong>It is not a teacher.</strong> Work inside what feels easy, come
+       out of anything that hurts, and follow your instructor over us.</p>
+    <button class="btn btn-primary btn-block" id="btn-safety-ok">Got it</button>
+  </div>
+</div>
+
+<script type="module">
+/**
+ * Which build is actually running.
+ *
+ * Bumped by hand when behaviour changes. It exists because "nothing changed"
+ * was the report twice running, and there was no way — for the user or for me —
+ * to tell a fix that had not worked from a fix that had never arrived. A phone
+ * serving the app out of a service worker cache cannot be mended by editing the
+ * app, and looks exactly like an app that is still broken.
+ *
+ * Shown in the ?debug=1 panel. If that panel does not appear at all, the device
+ * is running a build from before it existed, and ?fresh=1 is the way out.
+ */
+const BUILD = "2026-10-17c · a voice on the Mac";
+
+/**
+ * ?fresh=1 — throw away the service worker and every cache, then reload.
+ *
+ * The escape hatch for the above, and deliberately the first thing in the
+ * module: an escape hatch that only runs if the rest of the page evaluates is
+ * no use on the day the cached page is the broken one.
+ */
+const FRESH = new URLSearchParams(location.search).has("fresh");
+if (FRESH) {
+  (async () => {
+    try {
+      const registrations = await navigator.serviceWorker?.getRegistrations?.() ?? [];
+      await Promise.all(registrations.map((r) => r.unregister()));
+      const names = await caches?.keys?.() ?? [];
+      await Promise.all(names.map((n) => caches.delete(n)));
+    } catch { /* nothing to clear */ }
+    location.replace(location.pathname);
+  })();
+}
+
+import {
+  LM, SKELETON, reliableLandmarks, bodyFrame, segmentDirections, computeAngles,
+  VerdictLatch, v3,
+} from "./pose-core.js";
+import {
+  InstructorTrack, instructorAnchor, instructorBounds, classStartsAt,
+} from "./instructor.js";
+import {
+  compareToInstructor, PostureMonitor, MirrorLock, MotionTracker, movingWithClass,
+  disagreementOf, verdictSeverity, framingOf,
+  NOT_FOLLOWING_DISAGREEMENT, NOT_FOLLOWING_SUSTAIN_MS,
+} from "./follow.js";
+import { CueTrack } from "./cues.js";
+import { CURRENT as EXERCISE, withinExercise, exerciseOver, isRepeated } from "./exercise.js";
+import { FollowCoach, LINES, MISSING_PAUSE_MS, RepCoach } from "./coaching.js";
+import { RepTracker, repSignals, referenceRep, repFaults, FAULTS, anchorOf } from "./reps.js";
+import { buildFollowerPoints, instructorPoints, SEGMENT_END } from "./armature.js";
+import { Voice } from "./voice.js";
+import { FrameBudget } from "./pacing.js";
+
+// ─────────────────────────────────────────────────────────────
+// Elements
+// ─────────────────────────────────────────────────────────────
+const stage = document.getElementById("stage");
+const classVideo = document.getElementById("class-video");
+const selfVideo = document.getElementById("self-video");
+const overlay = document.getElementById("overlay");
+const ctx = overlay.getContext("2d");
+const caption = document.getElementById("caption");
+const playpause = document.getElementById("playpause");
+const playpauseIcon = document.getElementById("playpause-icon");
+const trackingDot = document.getElementById("tracking-dot");
+const trackingLabel = document.getElementById("tracking-label");
+const debugPanel = document.getElementById("debug");
+
+/**
+ * The decision, on screen, for anybody who opens the app with ?debug=1.
+ *
+ * Added after two rounds of reports that the app "was not doing anything",
+ * which is the one symptom this design cannot explain from the outside: every
+ * gate in it legitimately produces silence, so silence is consistent with
+ * working perfectly and with being completely broken. Reading the status label
+ * cannot tell them apart, and neither could I.
+ */
+const DEBUG = new URLSearchParams(location.search).has("debug");
+
+/**
+ * ?record=1 — write everything the app saw to a file, for later analysis.
+ *
+ * The app's one unfixable testing problem is that pose detection needs a camera
+ * pointed at a real person, and every automated test here has an empty room or
+ * a body replayed from the instructor's own trace. Both have now hidden real
+ * bugs: a comparison tuned against a body with the instructor's exact
+ * proportions says nothing about a different person at a different distance
+ * from a different lens.
+ *
+ * This records a real session — the student's landmarks, the instructor's
+ * frame, and every number the app decided on — so that the thing being
+ * debugged afterwards is what actually happened rather than a reconstruction
+ * of it. Needs the local server, which accepts the upload at /__record.
+ */
+const RECORD = new URLSearchParams(location.search).has("record");
+const recorded = [];
+let recordWarned = false;
+
+function recordFrame(payload) {
+  if (!RECORD) return;
+  recorded.push(payload);
+  // Posted in batches rather than per frame; a thirty-second session is a few
+  // thousand rows and the upload must not compete with inference.
+  if (recorded.length >= 120) flushRecording();
+}
+
+// A session that is only written when the exercise ends politely is a session
+// lost every time somebody closes the tab, which is most of them.
+if (RECORD) {
+  addEventListener("pagehide", flushRecording);
+  addEventListener("visibilitychange", () => { if (document.hidden) flushRecording(); });
+}
+
+function flushRecording() {
+  if (!RECORD || !recorded.length) return;
+  const batch = recorded.splice(0, recorded.length);
+  fetch("/__record", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ exercise: EXERCISE.id, rows: batch }),
+  }).catch(() => {
+    if (!recordWarned) {
+      recordWarned = true;
+      showCaption("Recording failed — is serve-demo.py running?", 4000);
+    }
+  });
+}
+if (DEBUG) debugPanel.hidden = false;
+
+/**
+ * A way to drive the app with a known body, for tests/probe.sh.
+ *
+ * Only exists under ?debug=1. Pose detection needs a real camera pointed at a
+ * real person, which no automated test has, and the consequence was three
+ * rounds of fixes that were verified by reasoning rather than by running: the
+ * suites could check the comparison and whether inference started, and nothing
+ * could check what the app does when it can actually see somebody.
+ *
+ * `feed` supplies the result the worker would have produced. Everything
+ * downstream — the comparison, both state machines, the pause, the zoom, the
+ * armature, the voice — then runs exactly as it does for a real student.
+ */
+if (DEBUG) {
+  window.__poiseTest = {
+    // While driving, results from the real worker are ignored — otherwise the
+    // camera's empty frames and the fed body overwrite each other at random.
+    driving: false,
+    feed(result) {
+      this.driving = true;
+      latest = result ? { ...result, at: performance.now() } : null;
+      diagnostic.detections++;
+    },
+    stop() { this.driving = false; latest = null; },
+    get speech() { return voice.events; },
+  };
+}
+
+function updateDebug() {
+  if (!DEBUG) return;
+  const d = diagnostic;
+  debugPanel.textContent = [
+    `video    ${d.videoTime.toFixed(1)}s  ${d.playing ? "playing" : "paused"}` +
+      `${pausedForMissing ? " (nobody in shot)" : ""}`,
+    `class    starts ${d.startsAt == null ? "?" : Number(d.startsAt).toFixed(1)}s  ` +
+      `started ${d.classStarted}  asking "${d.mode}"`,
+    `student  seen ${d.userSeen}  framing ${d.framing}  following ${d.following}  state ${d.state}`,
+    `motion   you ${d.travel == null ? "—" : d.travel.toFixed(0) + "°"}  ` +
+      `class ${d.instructorTravel == null ? "—" : d.instructorTravel.toFixed(0) + "°"}  ` +
+      `keepingUp ${d.keepingUp}`,
+    `judging  ${d.judging}  candidates ${d.candidates}  ` +
+      `sev ${d.severity == null ? "—" : d.severity.toFixed(2)}  ` +
+      `off ${d.disagreement == null ? "—" : d.disagreement.toFixed(2)}`,
+    `camera   ${d.detections} passes, ${d.bodies} with a body, ${Math.round(d.inference)}ms` +
+      `${d.error ? "  ERROR " + d.error : ""}`,
+    ...(REPEATED ? [repDebugLine()] : []),
+    `said     ${d.lastSaid ?? "nothing yet"}`,
+    `voice    ${voice.voice ? voice.voice.name : "browser default"}  ${speechHealth()}`,
+    `build    ${BUILD}`,
+  ].join("\n");
+}
+const loading = document.getElementById("loading");
+const loadingText = document.getElementById("loading-text");
+const loadingFill = document.getElementById("loading-fill");
+const startError = document.getElementById("start-error");
+
+const showScreen = (id) => {
+  document.querySelectorAll(".screen").forEach(s => s.classList.remove("active"));
+  document.getElementById(id).classList.add("active");
+};
+
+// ─────────────────────────────────────────────────────────────
+// State
+// ─────────────────────────────────────────────────────────────
+const voice = new Voice();
+
+/**
+ * Speak, with the class's own sound off until the line has been said.
+ *
+ * Over a playing class a one-second cue competes with the instructor counting
+ * and their music, and in a recording three of them in a row went unheard.
+ * Muted rather than turned down: iOS ignores a page's volume setting, and a
+ * second of silence from the class is how a cue is noticed. A user who has
+ * muted the class themselves is left muted.
+ */
+/** For the debug panel: what happened to the last line asked for. */
+function speechHealth() {
+  const last = [...voice.events].reverse().find((e) => e.what !== "asked");
+  return last ? `last line ${last.what}${last.error ? " (" + last.error + ")" : ""}` : "nothing spoken yet";
+}
+
+let speechSeen = 0;
+function speechSinceLastRow() {
+  const events = voice.events.filter((e) => e.seq > speechSeen);
+  if (!events.length) return undefined;
+  speechSeen = events[events.length - 1].seq;
+  return events.map(({ what, text, error, voice: name }) =>
+    ({ what, text, ...(error ? { error } : {}), ...(name ? { voice: name } : {}) }));
+}
+
+let classDucked = false;
+let duckTimer = 0;
+let duckFor = 0;
+function speakOverClass(text, interrupt) {
+  const duck = !classVideo.paused && !classVideo.muted && voice.enabled;
+  if (duck) { classVideo.muted = true; classDucked = true; }
+  // A line cut off by the next one reports its end too; only the latest
+  // line's end brings the sound back.
+  const mine = ++duckFor;
+  const restore = () => {
+    if (mine !== duckFor) return;
+    clearTimeout(duckTimer);
+    if (classDucked) { classVideo.muted = false; classDucked = false; }
+  };
+  if (classDucked) {
+    clearTimeout(duckTimer);
+    // In case the engine never reports the end: no line here is longer.
+    duckTimer = setTimeout(restore, 4000);
+  }
+  voice.speak(text, { interrupt, onDone: restore });
+}
+const budget = new FrameBudget();
+const monitor = new PostureMonitor();
+
+// The same state machine on a much higher bar and a slower fuse, asking only
+// whether the student is doing the class at all. See NOT_FOLLOWING_DISAGREEMENT.
+// Which way round the student is. Settled once, then held — see MirrorLock.
+const mirrorLock = new MirrorLock();
+
+// How much the student is actually moving. The only thing that separates
+// "standing still" from "at the bottom of a jumping jack" — see MOTION_RATIO.
+const motion = new MotionTracker();
+
+const followMonitor = new PostureMonitor({
+  critical: NOT_FOLLOWING_DISAGREEMENT,
+  minor: NOT_FOLLOWING_DISAGREEMENT,
+  criticalSustain: NOT_FOLLOWING_SUSTAIN_MS,
+  minorSustain: NOT_FOLLOWING_SUSTAIN_MS,
+});
+const coach = new FollowCoach();
+const verdicts = new VerdictLatch();
+
+// A repeated movement is judged one rep at a time, never frame by frame, and
+// the class is never stopped to correct it. See reps.js.
+const REPEATED = isRepeated(EXERCISE);
+const repTracker = new RepTracker();
+const repCoach = new RepCoach(FAULTS);
+let repReference = null;       // the instructor's typical rep
+let repFedAt = 0;              // the last worker result fed to the tracker
+let repMarker = null;          // what is being shown at the top of a rep
+let lastRepEvent = null;       // for the debug panel
+
+let track = null;              // the instructor timeline
+let cues = null;               // what the instructor asks for, in words
+let missingSince = 0;          // when the camera last had a body, 0 if it does
+let positioning = true;        // waiting for the student to stand where they can be seen
+let framedSince = 0;           // when the framing last became good, 0 if it is not
+let pausedForMissing = false;  // the class is stopped because nobody is there
+let userPaused = false;        // …or because the student pressed pause
+let worker = null;
+let workerReady = false;
+let frameInFlight = false;
+let frameSentAt = 0;
+let latest = null;             // the last result from the worker
+
+// Counters only — see where this is published to window, below.
+const diagnostic = {
+  detections: 0, bodies: 0, inference: 0, delegate: null, error: null,
+  // The decision, every frame, so that "the app is doing nothing" can be told
+  // apart from "the app decided to do nothing, for this reason". Reading the
+  // label off the screen cannot distinguish those and cost two rounds of
+  // guessing at it.
+  videoTime: 0, playing: false, startsAt: null, classStarted: false,
+  mode: null, judging: false, watching: false, following: true,
+  candidates: 0, severity: null, disagreement: null, state: "ok",
+  userSeen: false, label: "", lastSaid: null,
+};
+let running = false;
+let rafId = null;
+let facingMode = "user";
+let cameraStream = null;
+let guidance = null;           // the live comparison, while guidance is up
+let armatureShownAt = 0;
+let resolvedAt = 0;
+
+// A frame outstanding this long is not coming back. The worker replies on
+// every path, so this should never fire — which is exactly what was believed
+// about the two paths that once wedged the app permanently.
+const FRAME_TIMEOUT_MS = 4000;
+const RESULT_STALE_MS = 1200;
+
+// How long after the zoom lands before the armature appears, and how long it
+// lingers once the posture is right. Both come from the mocks: the guidance
+// arrives after the frame has settled, and leaves immediately.
+const ARMATURE_DELAY_MS = 420;
+const RESOLVED_HOLD_MS = 900;
+
+// ─────────────────────────────────────────────────────────────
+// Safety notice
+// ─────────────────────────────────────────────────────────────
+const SAFETY_KEY = "withpoise.safety";
+const safetyPanel = document.getElementById("safety");
+try {
+  if (localStorage.getItem(SAFETY_KEY) !== "seen") safetyPanel.classList.add("visible");
+} catch { safetyPanel.classList.add("visible"); }
+document.getElementById("btn-safety-ok").addEventListener("click", () => {
+  try { localStorage.setItem(SAFETY_KEY, "seen"); } catch { /* shown again next time */ }
+  safetyPanel.classList.remove("visible");
+});
+
+// ─────────────────────────────────────────────────────────────
+// Sound
+// ─────────────────────────────────────────────────────────────
+const btnSound = document.getElementById("btn-sound");
+function renderSound() {
+  document.getElementById("sound-icon")
+    .setAttribute("href", voice.enabled ? "#i-sound-on" : "#i-sound-off");
+  btnSound.classList.toggle("off", !voice.enabled);
+}
+btnSound.addEventListener("click", () => { voice.enabled = !voice.enabled; renderSound(); });
+renderSound();
+
+// ─────────────────────────────────────────────────────────────
+// The pose worker — the user's camera only
+// ─────────────────────────────────────────────────────────────
+function startWorker() {
+  if (worker) worker.terminate();
+  workerReady = false;
+  frameInFlight = false;
+  latest = null;
+  budget.reset();
+
+  // A readout of what inference is actually doing, with no interface attached.
+  //
+  // The original app showed this on screen; this one cannot, because its whole
+  // premise is that nothing appears while the class is going well. But without
+  // it there is no way to tell a page that is detecting a still, empty room
+  // from a page whose landmarker never started — the two look identical, and
+  // looking identical is how the original app shipped a broken landmarker
+  // behind a green test suite for its entire history.
+  //
+  // tests/smoke.sh reads this. Nothing in the app does.
+  window.__poise = diagnostic;
+
+  worker = new Worker("pose-worker.js", { type: "module" });
+  worker.onmessage = (e) => {
+    const msg = e.data;
+    if (msg.type === "status") {
+      if (msg.state === "ready") {
+        workerReady = true;
+        setLoading(null);
+      } else if (msg.state === "error") {
+        diagnostic.error = msg.message;
+        setLoading(`Pose detection failed: ${msg.message}`, null, true);
+      } else {
+        setLoading(msg.message, msg.progress);
+      }
+    } else if (msg.type === "result") {
+      msg.at = performance.now();
+      if (!(DEBUG && window.__poiseTest && window.__poiseTest.driving)) latest = msg;
+      frameInFlight = false;
+      budget.record(msg.inference);
+      diagnostic.detections++;
+      diagnostic.inference = msg.inference;
+      diagnostic.delegate = msg.delegate || diagnostic.delegate;
+      if (msg.detected) diagnostic.bodies++;
+    }
+  };
+  worker.onerror = (err) => {
+    diagnostic.error = err.message;
+    setLoading(`Pose detection failed: ${err.message}`, null, true);
+  };
+  worker.postMessage({ type: "init", model: "full" });
+}
+
+function sendFrame(now) {
+  if (frameInFlight && now - frameSentAt > FRAME_TIMEOUT_MS) frameInFlight = false;
+  if (!workerReady || frameInFlight || selfVideo.readyState < 2) return;
+  if (!budget.due(now)) return;
+  budget.markSent(now);
+  frameInFlight = true;
+  frameSentAt = now;
+  createImageBitmap(selfVideo)
+    .then(bitmap => worker.postMessage({ type: "frame", bitmap, timestamp: performance.now() }, [bitmap]))
+    .catch(() => { frameInFlight = false; });
+}
+
+function setLoading(text, progress, fatal) {
+  if (text === null) { loading.classList.add("hidden"); return; }
+  loading.classList.remove("hidden");
+  loadingText.textContent = text;
+  loadingFill.style.width = typeof progress === "number" ? `${Math.round(progress * 100)}%` : "0%";
+  if (fatal) loading.querySelector(".spinner").style.display = "none";
+}
+
+// ─────────────────────────────────────────────────────────────
+// Camera
+// ─────────────────────────────────────────────────────────────
+function cameraProblem(err) {
+  const name = (err && err.name) || "";
+  if (name === "NotAllowedError" || name === "SecurityError") {
+    return "Camera access was blocked. Allow it for this page and try again — " +
+           "nothing you record leaves your device.";
+  }
+  if (name === "NotFoundError" || name === "OverconstrainedError") {
+    return "No camera found on this device.";
+  }
+  if (name === "NotReadableError") {
+    return "The camera is busy. Close whatever else is using it and try again.";
+  }
+  return (err && err.message) || "The camera would not start.";
+}
+
+async function startCamera() {
+  if (cameraStream) cameraStream.getTracks().forEach(t => t.stop());
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode, width: { ideal: 1280 }, height: { ideal: 720 } },
+    audio: false,
+  });
+  cameraStream = stream;
+  selfVideo.srcObject = stream;
+  await selfVideo.play();
+}
+
+function stopCamera() {
+  if (cameraStream) cameraStream.getTracks().forEach(t => t.stop());
+  cameraStream = null;
+}
+
+document.getElementById("btn-flip").addEventListener("click", async () => {
+  facingMode = facingMode === "user" ? "environment" : "user";
+  try { await startCamera(); } catch (err) { showCaption(cameraProblem(err)); }
+});
+
+// ─────────────────────────────────────────────────────────────
+// Captions
+// ─────────────────────────────────────────────────────────────
+let captionUntil = 0;
+function showCaption(text, holdMs = 4000) {
+  if (!text) return;
+  caption.textContent = text;
+  caption.classList.add("visible");
+  // A hold of zero means "until something takes it down" — used while the
+  // class is stopped waiting for somebody to step back into shot, where a
+  // caption that times out would leave them with no explanation and a frozen
+  // video.
+  captionUntil = holdMs > 0 ? performance.now() + holdMs : 0;
+}
+function tickCaption(now) {
+  if (captionUntil && now > captionUntil) {
+    caption.classList.remove("visible");
+    captionUntil = 0;
+  }
+}
+
+/** Take a caption down now, rather than waiting for it to time out. */
+function hideCaption() {
+  caption.classList.remove("visible");
+  captionUntil = 0;
+}
+
+// ─────────────────────────────────────────────────────────────
+// Pausing and zooming
+//
+// The mocks are specific: a critical fault pauses the class and zooms into the
+// instructor, the guidance appears, and the moment the posture is right it all
+// leaves and the class resumes on its own. The zoom is a transform on the
+// stage, so the overlay — which lives inside it — stays registered to the
+// picture without any arithmetic.
+// ─────────────────────────────────────────────────────────────
+let zoomed = false;
+
+function zoomTo(bounds) {
+  if (!bounds) return;
+  const scale = Math.min(2.6, Math.max(1.3,
+    0.82 / Math.max(bounds.width, bounds.height * (9 / 16))));
+  const cx = bounds.x + bounds.width / 2;
+  const cy = bounds.y + bounds.height / 2;
+  // Translate the chosen centre to the middle of the stage, then scale about it.
+  const dx = (0.5 - cx) * 100;
+  const dy = (0.5 - cy) * 100;
+  stage.style.transform = `scale(${scale.toFixed(3)}) translate(${dx.toFixed(2)}%, ${dy.toFixed(2)}%)`;
+  zoomed = true;
+}
+
+function zoomOut() {
+  stage.style.transform = "";
+  zoomed = false;
+}
+
+/**
+ * Has the class begun by video time `t`?
+ *
+ * The scalar comes from classStartsAt, which is where the reasoning and the
+ * backstop live.
+ */
+function hasClassStarted(t) {
+  if (!Number.isFinite(t)) return false;
+  return t >= classStartsAt(
+    track ? track.startsAt : null,
+    cues ? cues.firstInstructionAt : null);
+}
+
+/**
+ * How long the framing has to be right before the class begins.
+ *
+ * Long enough that somebody drifting through a good position on their way
+ * somewhere else does not start the class by accident, short enough that
+ * standing in the right place does not feel like it is being ignored.
+ */
+const READY_MS = 1200;
+
+const round3 = (v) => v == null ? null : Math.round(v * 1000) / 1000;
+
+function setPaused(paused) {
+  if (paused) {
+    classVideo.pause();
+    playpause.classList.add("visible");
+    playpauseIcon.setAttribute("href", "#i-play");
+  } else {
+    classVideo.play().catch(() => {});
+    playpause.classList.remove("visible");
+    playpauseIcon.setAttribute("href", "#i-pause");
+  }
+}
+
+playpause.addEventListener("click", () => {
+  if (classVideo.paused) {
+    // Taking manual control cancels whatever the guidance was doing.
+    userPaused = false;
+    pausedForMissing = false;
+    monitor.reset();
+    followMonitor.reset();
+    coach.reset();
+    resetReps();
+    guidance = null;
+    hideCaption();
+    zoomOut();
+    setPaused(false);
+  } else {
+    // Held until they press play again — the frame loop's "resume unless
+    // something is holding it" rule must not override a deliberate pause.
+    userPaused = true;
+    setPaused(true);
+  }
+});
+
+document.getElementById("btn-exit").addEventListener("click", () => endClass());
+
+// ─────────────────────────────────────────────────────────────
+// Drawing
+// ─────────────────────────────────────────────────────────────
+function fitOverlay() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const w = stage.clientWidth, h = stage.clientHeight;
+  if (!w || !h) return null;
+  if (overlay.width !== Math.round(w * dpr) || overlay.height !== Math.round(h * dpr)) {
+    overlay.width = Math.round(w * dpr);
+    overlay.height = Math.round(h * dpr);
+  }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  return { w, h };
+}
+
+/** A landmark array in normalised coordinates → stage pixels. */
+const toStage = (p, size) => ({ x: p.x * size.w, y: p.y * size.h });
+
+function strokeBones(points, size, { colour, width, halo }) {
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  for (const [a, b] of SKELETON) {
+    if (!points[a] || !points[b]) continue;
+    const from = toStage(points[a], size), to = toStage(points[b], size);
+    if (halo) {
+      ctx.strokeStyle = halo;
+      ctx.lineWidth = width + 3.5;
+      ctx.beginPath(); ctx.moveTo(from.x, from.y); ctx.lineTo(to.x, to.y); ctx.stroke();
+    }
+    ctx.strokeStyle = colour;
+    ctx.lineWidth = width;
+    ctx.beginPath(); ctx.moveTo(from.x, from.y); ctx.lineTo(to.x, to.y); ctx.stroke();
+  }
+  for (const name of Object.keys(LM)) {
+    if (name === "nose" || !points[name]) continue;
+    const p = toStage(points[name], size);
+    if (halo) {
+      ctx.fillStyle = halo;
+      ctx.beginPath(); ctx.arc(p.x, p.y, width * 0.95 + 1.6, 0, 2 * Math.PI); ctx.fill();
+    }
+    ctx.fillStyle = colour;
+    ctx.beginPath(); ctx.arc(p.x, p.y, width * 0.95, 0, 2 * Math.PI); ctx.fill();
+  }
+}
+
+function drawArrow(from, to, size, colour) {
+  const a = toStage(from, size), b = toStage(to, size);
+  const dx = b.x - a.x, dy = b.y - a.y;
+  const distance = Math.hypot(dx, dy);
+  if (distance < 14) return;
+  const ux = dx / distance, uy = dy / distance;
+  // Start clear of the joint dot and stop short of the target, so the arrow
+  // reads as a nudge rather than as another bone.
+  const start = { x: a.x + ux * 10, y: a.y + uy * 10 };
+  const end = { x: a.x + ux * Math.min(distance - 4, 74), y: a.y + uy * Math.min(distance - 4, 74) };
+
+  ctx.strokeStyle = colour;
+  ctx.lineWidth = 4.5;
+  ctx.lineCap = "round";
+  ctx.beginPath(); ctx.moveTo(start.x, start.y); ctx.lineTo(end.x, end.y); ctx.stroke();
+
+  const head = 13, nx = -uy, ny = ux;
+  ctx.fillStyle = colour;
+  ctx.beginPath();
+  ctx.moveTo(end.x + ux * 4, end.y + uy * 4);
+  ctx.lineTo(end.x - ux * head + nx * head * 0.55, end.y - uy * head + ny * head * 0.55);
+  ctx.lineTo(end.x - ux * head - nx * head * 0.55, end.y - uy * head - ny * head * 0.55);
+  ctx.closePath(); ctx.fill();
+}
+
+function drawGuidance(size, now) {
+  if (!guidance || !guidance.instructorImage) return;
+  const settled = now - armatureShownAt > ARMATURE_DELAY_MS;
+  if (!settled) return;
+
+  const reference = instructorPoints(guidance.instructorImage);
+  const follower = guidance.followerPoints;
+  const correct = guidance.state === "ok";
+  const userColour = correct ? "var(--right)" : "var(--wrong)";
+  const resolved = getComputedStyle(document.documentElement);
+  const colourOf = (token) => resolved.getPropertyValue(token).trim();
+
+  // The instructor first, underneath: a reference is a thing you lay your own
+  // shape over, not a thing that competes with it.
+  strokeBones(reference, size, {
+    colour: colourOf("--reference"), width: 5, halo: "rgba(255,255,255,0.9)",
+  });
+
+  if (follower) {
+    strokeBones(follower, size, {
+      colour: colourOf(correct ? "--right" : "--wrong"), width: 4.5,
+      halo: "rgba(255,255,255,0.85)",
+    });
+
+    if (!correct) {
+      // One arrow per fault, at most two — the voice says one thing at a time
+      // and the picture should not contradict it.
+      for (const fault of guidance.faults.slice(0, 2)) {
+        const ends = fault.explains ? fault.explains.map(s => SEGMENT_END[s]) : [SEGMENT_END[fault.segment]];
+        for (const end of ends) {
+          if (!end || !follower[end] || !reference[end]) continue;
+          drawArrow(follower[end], reference[end], size, colourOf("--wrong"));
+        }
+      }
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// The rep marker
+//
+// At the top of each rep while a fault is being coached: where this rep got to,
+// drawn on the instructor's body, against where the instructor's own reps get
+// to. Held for most of a rep and then faded, so that while a fault is being
+// coached it is on screen nearly all the time: at 650ms it flashed and was gone
+// before a student mid-jump could look up at it.
+//
+// The student's measures are in their own body units (see reps.js), so they
+// map onto the instructor by the instructor's own torso and shoulders. The
+// student's left is drawn on the screen's left, which is the side they see
+// themselves raise when they look at it.
+// ─────────────────────────────────────────────────────────────
+const MARKER_SOLID_MS = 1100;
+const MARKER_FADE_MS = 400;
+
+function resetReps() {
+  repTracker.reset();
+  repCoach.reset();
+  repMarker = null;
+  lastRepEvent = null;
+  if (repCaption) hideCaption();
+  repCaption = null;
+}
+
+// The cue for the fault being coached, kept on screen until it is fixed. A
+// spoken line lasts a second and a 1.8s caption not much longer; both were
+// missed in a recording by somebody who was jumping at the time.
+let repCaption = null;
+function showRepCaption(text) {
+  const showing = caption.classList.contains("visible") && caption.textContent === text;
+  if (text === repCaption && (!text || showing)) return;
+  if (text) showCaption(text, 0);
+  else if (repCaption && caption.textContent === repCaption) hideCaption();
+  repCaption = text;
+}
+
+function repDebugLine() {
+  const e = lastRepEvent;
+  const r = e ? (e.rep || e.top) : null;
+  const f = (v) => (v == null ? "—" : v.toFixed(2));
+  return `reps     ${repTracker.count} done  coaching ${repCoach.focus ?? "nothing"}` +
+    (r ? `  last ${e.kind}: reach ${f(r.reach)} feet ${f(r.feetTop)}/${f(r.feetBottom)} lag ${f(r.lag)}` : "") +
+    (repReference ? "" : "  NO REFERENCE");
+}
+
+function drawRepMarker(size, now) {
+  if (!repMarker || !repReference || !track) return;
+  const age = now - repMarker.shownAt;
+  if (age > MARKER_SOLID_MS + MARKER_FADE_MS) { repMarker = null; return; }
+
+  const anchor = anchorOf(track.window(classVideo.currentTime, 1.4).map((f) => f.image));
+  if (!anchor) return;
+
+  const resolved = getComputedStyle(document.documentElement);
+  const colourOf = (token) => resolved.getPropertyValue(token).trim();
+  const target = colourOf("--reference");
+  const yours = colourOf(repMarker.state === "fixed" ? "--right" : "--wrong");
+  const { cx, shoulderY, torso, width, ankleY } = anchor;
+  const yOf = (reach) => shoulderY - reach * torso;
+  const top = repMarker.top || {};
+  const rep = repMarker.rep || {};
+
+  ctx.save();
+  ctx.globalAlpha = age < MARKER_SOLID_MS ? 1 : 1 - (age - MARKER_SOLID_MS) / MARKER_FADE_MS;
+
+  const line = (x0, x1, y, colour) => {
+    const a = toStage({ x: x0, y }, size), b = toStage({ x: x1, y }, size);
+    ctx.lineCap = "round";
+    ctx.strokeStyle = "rgba(255,255,255,0.9)"; ctx.lineWidth = 9;
+    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+    ctx.strokeStyle = colour; ctx.lineWidth = 5;
+    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+  };
+  const tick = (x, y, colour) => {
+    const half = torso * 0.32;
+    const a = toStage({ x, y: y - half }, size), b = toStage({ x, y: y + half }, size);
+    ctx.lineCap = "round";
+    ctx.strokeStyle = "rgba(255,255,255,0.9)"; ctx.lineWidth = 9;
+    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+    ctx.strokeStyle = colour; ctx.lineWidth = 5;
+    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+  };
+  const wrong = repMarker.state !== "fixed";
+
+  // The arms, as a level: the instructor's reach and this rep's.
+  const arms = (want, got) => {
+    if (got == null) return;
+    const half = width * 0.85;
+    line(cx - half, cx + half, yOf(want), target);
+    line(cx - half * 0.8, cx + half * 0.8, yOf(got), yours);
+    if (wrong) drawArrow({ x: cx, y: yOf(got) }, { x: cx, y: yOf(want) }, size, yours);
+  };
+  // The feet, as a pair of marks at ankle height: how far apart they should
+  // be and how far apart they were.
+  const feet = (want, got) => {
+    if (got == null) return;
+    const w = (f) => (f * width) / 2;
+    tick(cx - w(want), ankleY, target); tick(cx + w(want), ankleY, target);
+    tick(cx - w(got), ankleY, yours); tick(cx + w(got), ankleY, yours);
+    if (wrong) {
+      drawArrow({ x: cx - w(got), y: ankleY }, { x: cx - w(want), y: ankleY }, size, yours);
+      drawArrow({ x: cx + w(got), y: ankleY }, { x: cx + w(want), y: ankleY }, size, yours);
+    }
+  };
+
+  switch (repMarker.fault) {
+    case "arms-up": arms(repReference.reach, top.reach); break;
+    case "arms-down": arms(repReference.reachBottom, rep.reachBottom); break;
+    case "feet-wide": feet(repReference.feetTop, top.feetTop); break;
+    case "feet-in": feet(repReference.feetBottom, rep.feetBottom); break;
+    case "together":
+      // Where the feet were when the hands were up.
+      feet(repReference.feetTop, top.feetAtArms ?? rep.feetAtArms);
+      break;
+    case "arms-even": {
+      if (top.reachL == null || top.reachR == null) break;
+      const half = width * 0.4;
+      for (const [x, got] of [[cx - width * 0.75, top.reachL], [cx + width * 0.75, top.reachR]]) {
+        line(x - half, x + half, yOf(repMarker.state === "fixed" ? got : repReference.reach), target);
+        line(x - half * 0.8, x + half * 0.8, yOf(got), yours);
+        if (wrong && got < repReference.reach - 0.15) {
+          drawArrow({ x, y: yOf(got) }, { x, y: yOf(repReference.reach) }, size, yours);
+        }
+      }
+      break;
+    }
+  }
+  ctx.restore();
+}
+
+// ─────────────────────────────────────────────────────────────
+// The loop
+// ─────────────────────────────────────────────────────────────
+function frame(now) {
+  if (!running) return;
+  rafId = requestAnimationFrame(frame);
+
+  const size = fitOverlay();
+  if (!size) return;
+  tickCaption(now);
+
+  sendFrame(now);
+
+  const fresh = latest && performance.now() - latest.at < RESULT_STALE_MS;
+  const user = fresh && latest.detected ? latest : null;
+  const instructorNow = track ? track.at(classVideo.currentTime) : null;
+
+  // Nothing happens until the instructor is actually practising.
+  //
+  // Classes open with a greeting — a word about what is coming, sometimes a
+  // story — and during it there is nothing to follow, so correcting anybody is
+  // not just unhelpful, it is wrong. The demo video talks for its first
+  // thirty-five seconds. See detectClassStart in instructor.js for how that is
+  // measured; it is not a hand-set number.
+  // One exercise, and the demo ends with it. Judging starts where the movement
+  // does rather than where the instructor starts talking about it.
+  if (!positioning && exerciseOver(classVideo.currentTime)) {
+    finishExercise();
+    return;
+  }
+  const classStarted = withinExercise(classVideo.currentTime);
+
+  // What the instructor has actually asked for, in words.
+  //
+  // This is the authority when it has an opinion. Inferring intent from how
+  // still the instructor is got it right about three quarters of the time and
+  // was wrong in the way that matters — correcting people for doing exactly
+  // what they had been told to do. See cues.js.
+  //
+  //   holding    the student was told to stay. A static pose comparison is the
+  //              right instrument and this is where the app earns its keep.
+  //   reps       repetitions are being counted. The student is moving on their
+  //              own rhythm and comparing them to one frame of video says
+  //              nothing, so the app does not.
+  //   settling   a movement has just been named; they are getting into it.
+  //   resting    it is over.
+  //   unknown    no cue recent enough to trust — fall back to the geometry.
+  const instruction = cues && classStarted
+    ? cues.modeAt(classVideo.currentTime)
+    : { mode: "unknown", since: null };
+
+  // What the class is asking for right now: the poses the instructor has
+  // settled into recently, not whatever shape they are in at this instant.
+  //
+  // Empty means they are in continuous motion with nothing settled behind them
+  // — a flowing sequence, or an explanation that has run on — and the app says
+  // nothing rather than guess. Correcting a student's form against a reference
+  // that is itself mid-movement, two seconds behind, is noise.
+  // How far back to look for the pose being asked for. When the instruction
+  // itself says when the hold began, that is a better bound than a fixed
+  // twenty seconds: it reaches back exactly as far as the thing the student was
+  // told to do, and no further.
+  const memory = instruction.mode === "holding" && instruction.since != null
+    ? Math.min(40, Math.max(4, classVideo.currentTime - instruction.since + 4))
+    : undefined;
+  const asking = classStarted && track
+    ? track.referenceWindow(classVideo.currentTime, memory) : [];
+
+  // Speech decides when it has an opinion; geometry decides when it does not.
+  const holding = !classStarted ? false
+    : instruction.mode === "holding" ? true
+    : instruction.mode !== "unknown" ? false
+    : track ? track.isHolding(classVideo.currentTime) : false;
+
+  // Two questions, asked separately, because they are different questions.
+  //
+  //   judging    is the class asking for a shape to be held, so that naming a
+  //              limb means anything? Only during a hold, or when speech has
+  //              no opinion and the instructor has gone still.
+  //   watching   is there any reference at all to compare against? If so, the
+  //              app can always tell whether the student is doing the class,
+  //              even when it cannot say anything useful about their form.
+  //
+  // Collapsing these into one gate is what left the app silent for six minutes
+  // in front of somebody standing motionless: the class never asks anyone to
+  // hold a pose, so `judging` was false throughout, and "are you even
+  // attempting this" went unasked along with everything else.
+  //
+  // A repeated movement is never judged this way. Each of its frames is half
+  // way to somewhere, and holding one of them up against the instructor is what
+  // stopped a recorded session eleven times in nine seconds of class. Its form
+  // is judged per rep, further down.
+  const judging = !REPEATED && classStarted && holding && asking.length > 0;
+  const watching = classStarted && asking.length > 0;
+  // Getting somebody into frame is setup, not coaching, so it is not gated on
+  // the class having started — it is most useful before it does.
+  //
+  // "Seen" means usable, not merely detected. A student close to their phone is
+  // detected with complete confidence from the shoulders up while their hips,
+  // knees and ankles are off the bottom of the picture, and everything below
+  // here would then decline to judge and say nothing about why. See framingOf.
+  const userReliable = user && user.landmarks ? reliableLandmarks(user.landmarks) : null;
+  const framing = user ? framingOf(userReliable) : "absent";
+  const canSeeUser = !!user && framing === "ok";
+
+  // ── Nothing starts until the student can actually be seen ──
+  //
+  // The class used to begin the moment the button was pressed, and a student
+  // standing too close discovered only afterwards — from thirty seconds of
+  // silence — that none of it was going to work. Checking first costs a few
+  // seconds and makes the failure legible instead of invisible.
+  //
+  // The video is held at the point where the instructor introduces the
+  // exercise, so the student has something to look at while they move.
+  if (positioning) {
+    if (framing === "ok") {
+      if (!framedSince) framedSince = now;
+    } else {
+      framedSince = 0;
+    }
+
+    if (!classVideo.paused) setPaused(true);
+
+    if (framedSince && now - framedSince >= READY_MS) {
+      positioning = false;
+      framedSince = 0;
+      missingSince = 0;
+      hideCaption();
+      voice.speak(`That's it. Here comes ${EXERCISE.name}.`, { interrupt: true });
+      setPaused(false);
+    } else {
+      trackingDot.classList.add("visible");
+      trackingDot.classList.toggle("searching", framing !== "ok");
+      trackingDot.classList.toggle("waiting", framing === "ok");
+      trackingLabel.textContent =
+        framing === "ok" ? "Ready" : !user ? "Looking for you" : "Step back";
+      showCaption(
+        !user ? "Step into view so I can see you."
+        : framing === "cropped" ? LINES.cropped
+        : "Hold there — starting.", 0);
+      // Said once rather than every frame; the coach does its own throttling.
+      const said = coach.update({
+        state: "ok", faults: [], visible: !!user, framing, listening: false,
+      }, now);
+      if (said) {
+        diagnostic.lastSaid = said.text;
+        voice.speak(said.text, { interrupt: said.interrupt });
+      }
+
+      Object.assign(diagnostic, {
+        videoTime: classVideo.currentTime, playing: false,
+        startsAt: track ? track.startsAt : null, classStarted: false,
+        mode: "positioning", judging: false, watching: false,
+        candidates: 0, userSeen: !!user, framing, following: true,
+        state: "ok", severity: null, disagreement: null,
+      });
+      diagnostic.label = trackingLabel.textContent;
+      updateDebug();
+      recordFrame({
+        at: Math.round(now), t: Number(classVideo.currentTime.toFixed(3)),
+        seen: !!user, framing, positioning: true,
+        landmarks: user && user.landmarks
+          ? user.landmarks.map((p) => [round3(p.x), round3(p.y), round3(p.z ?? 0), round3(p.visibility ?? 1)])
+          : null,
+        world: user && user.world ? user.world.map((p) => [round3(p.x), round3(p.y), round3(p.z ?? 0)]) : null,
+      });
+      return;
+    }
+  }
+
+  // ── Stop the class if there is nobody there ──
+  //
+  // Armed only once inference is actually running, because the camera and the
+  // model take a few seconds to start and everything looks empty until they
+  // have. Without that guard this pauses the class before it has begun, every
+  // time.
+  const looking = diagnostic.detections > 0;
+  if (!looking || canSeeUser) {
+    missingSince = 0;
+  } else if (!missingSince) {
+    missingSince = now;
+  }
+
+  const shouldPauseForMissing = !canSeeUser && looking
+    && missingSince > 0 && now - missingSince >= MISSING_PAUSE_MS;
+
+  if (shouldPauseForMissing && !pausedForMissing) {
+    pausedForMissing = true;
+    setPaused(true);
+    showCaption(framing === "cropped" ? LINES.cropped : LINES.lost, 0);
+  } else if (!shouldPauseForMissing && pausedForMissing) {
+    // Back in shot.
+    //
+    // This used to reset both state machines and restart the video, which made
+    // walking out of frame a way to clear a correction without fixing
+    // anything — step out, step back, and the class carried on as though the
+    // posture had been put right. Nothing is reset now: the flag is dropped and
+    // the ordinary verdict logic below decides whether the class resumes, so a
+    // correction that was standing before is still standing after.
+    pausedForMissing = false;
+    hideCaption();
+  }
+
+  let comparison = null;
+  let studentTravel = null;
+  if (!canSeeUser) motion.reset();
+  if (watching && canSeeUser && user.world && track) {
+    const reliable = userReliable;
+    const frameOf = bodyFrame(user.world);
+    comparison = compareToInstructor({
+      directions: segmentDirections(user.world, frameOf),
+      frame: frameOf,
+      angles: computeAngles(user.world, user.landmarks, 1, 1),
+      reliable,
+    }, asking, { mirror: mirrorLock.value });
+    // Evidence accumulates from the undecided frames; once settled, this is a
+    // no-op and the reading above is already fixed.
+    if (comparison) mirrorLock.observe(comparison.scores);
+    studentTravel = motion.observe(
+      segmentDirections(user.world, frameOf), now / 1000);
+  }
+
+  // Form, when the class is asking for a shape.
+  const formVerdict = monitor.update(verdictSeverity(comparison), now, { judging });
+
+  // Is the student moving with the class at all?
+  //
+  // Asked separately from how well their shape matches, because for a
+  // repetitive exercise the shape cannot answer it: a jumping jack passes
+  // through the resting pose twice a second. null means the question does not
+  // apply — the instructor is not moving either, or there is not enough history
+  // yet — and then only the posture reading has an opinion.
+  const instructorTravel = track && classStarted ? track.travelAt(classVideo.currentTime) : 0;
+  const keepingUp = watching && canSeeUser
+    ? movingWithClass(studentTravel, instructorTravel) : null;
+
+  // And whether they are doing the class at all, which is asked throughout.
+  // A different measure from form, for the reason set out at
+  // NOT_FOLLOWING_DISAGREEMENT: how much of the body is wrong, not how wrong
+  // its worst part is.
+  // Standing still while the class moves is the clearer evidence of the two, so
+  // it is fed in at full strength rather than averaged with the posture reading.
+  //
+  // For a repeated movement, movement alone: the shape is wrong for most of
+  // every correct rep, so it cannot say whether somebody is attempting it.
+  const notFollowingSignal = REPEATED
+    ? (keepingUp == null ? null : keepingUp ? 0 : 1)
+    : keepingUp === false ? 1
+    : comparison ? disagreementOf(comparison) : null;
+  const followVerdict = followMonitor.update(notFollowingSignal, now, { judging: watching });
+  const following = followVerdict.state !== "critical";
+
+  // Not following is the louder fact and takes precedence: there is no point
+  // naming a limb to somebody who is not attempting the movement.
+  //
+  // Coming back counts as a change too. Passing the form verdict through
+  // untouched lost it: the form had been fine all along, so nothing reported
+  // a change, the resume never armed, and a student who started jumping again
+  // was left in front of a stopped class indefinitely.
+  const verdict = !following
+    ? { state: "critical", changed: followVerdict.changed || formVerdict.changed }
+    : { ...formVerdict, changed: formVerdict.changed || followVerdict.changed };
+
+  // ── State changes ──
+  //
+  // Skipped entirely while the class is stopped because nobody is in shot:
+  // there is no user pose to zoom to or draw, and the two pause reasons must
+  // not take turns resuming the video.
+  if (verdict.changed && !pausedForMissing) {
+    if (verdict.state === "critical") {
+      setPaused(true);
+      const bounds = instructorNow && instructorNow.image
+        ? instructorBounds(instructorNow.image) : null;
+      zoomTo(bounds);
+      armatureShownAt = now;
+      resolvedAt = 0;
+    } else if (verdict.state === "ok" && zoomed) {
+      resolvedAt = now;
+    }
+  }
+
+  // Guidance lives only while the class is interrupted — and it holds the
+  // frame it was raised on. The video is paused, so the instructor is not
+  // moving; following live time here would make the reference drift away from
+  // the picture behind it.
+  // Not for a repeated movement: a still skeleton laid over somebody who is
+  // supposed to be jumping is a picture of the wrong thing.
+  if (!REPEATED && (verdict.state === "critical" || (zoomed && resolvedAt))) {
+    const reference = (guidance && guidance.sample) || instructorNow;
+    if (comparison && reference && reference.image) {
+      guidance = {
+        state: verdict.state,
+        faults: comparison.faults,
+        instructorImage: reference.image,
+        followerPoints: buildFollowerPoints(
+          comparison.userDirections, reference.image, comparison.mirrored),
+        sample: reference,
+      };
+    }
+  } else {
+    guidance = null;
+  }
+
+  // ── Resume once the posture has been right for a beat ──
+  if (zoomed && resolvedAt && now - resolvedAt > RESOLVED_HOLD_MS && verdict.state === "ok") {
+    guidance = null;
+    resolvedAt = 0;
+    zoomOut();
+    setPaused(false);
+  }
+
+  // The class plays unless something is actually holding it.
+  //
+  // Stated as an invariant rather than left to whichever branch paused it to
+  // remember to undo itself. There are two reasons the video stops — nobody in
+  // shot, and a posture being corrected — and each used to own its own resume,
+  // so a class stopped by one and released by the other stayed stopped
+  // forever with no indication why.
+  const held = pausedForMissing || zoomed || verdict.state === "critical";
+  if (running && !held && classVideo.paused && !userPaused) setPaused(false);
+
+  drawGuidance(size, now);
+
+  // ── A repeated movement, one rep at a time ──
+  //
+  // Every worker result is fed in once, whatever the display rate. Cues and
+  // the marker happen only at the top of a rep — on the way down, so a cue is
+  // heard before the next rep starts — and only while the class is playing
+  // and the student is with it. Nothing here ever pauses the class.
+  let repSaid = null;
+  if (REPEATED && classStarted && canSeeUser && latest && latest.at !== repFedAt) {
+    repFedAt = latest.at;
+    const event = repTracker.observe(latest.at / 1000, repSignals(user.landmarks));
+    if (event) lastRepEvent = event;
+    const coaching = repReference && following && !classVideo.paused && !zoomed;
+    if (event && event.kind === "rep") {
+      repCoach.rep(event.rep, repFaults(event.rep, repReference));
+    } else if (event && event.kind === "top" && coaching) {
+      const decision = repCoach.top(event.top, repFaults(event.top, repReference), now);
+      if (decision.marker) repMarker = { ...decision.marker, shownAt: now };
+      if (decision.say) repSaid = decision.say;
+    }
+  }
+  if (REPEATED && (zoomed || classVideo.paused)) repMarker = null;
+  drawRepMarker(size, now);
+  if (REPEATED && !repSaid) {
+    const coaching = classStarted && following && !classVideo.paused && !zoomed;
+    showRepCaption(coaching ? repCoach.caption : null);
+  }
+
+  // ── The voice ──
+  const said = repSaid ? { text: repSaid, interrupt: true } : coach.update({
+    state: verdict.state,
+    faults: comparison ? comparison.faults : [],
+    severity: comparison ? comparison.severity : 0,
+    visible: !!user,
+    framing,
+    following,
+    // Gates only what the coach says about how the student is *doing*. Whether
+    // it can see them at all is decided inside, ahead of this.
+    listening: judging || !following,
+  }, now);
+  Object.assign(diagnostic, {
+    following, state: verdict.state,
+    severity: comparison ? comparison.severity : null,
+    disagreement: comparison ? disagreementOf(comparison) : null,
+  });
+
+  // The status readout, placed here because it depends on the verdicts.
+  //
+  // It used to sit near the top of the frame, above the comparison — and
+  // read `following`, which is declared below it. That is a temporal dead
+  // zone, so the loop threw a ReferenceError at this line on every single
+  // frame: the label was set, and then nothing after it ran. No comparison,
+  // no verdict, no pause, no armature, no voice. The app showed a plausible
+  // status and was otherwise dead, which is indistinguishable from the
+  // deliberate silences the design is full of, and survived three rounds of
+  // debugging because every test either skipped the frame loop or had no
+  // body to put in front of it.
+  trackingDot.classList.add("visible");
+  trackingDot.classList.toggle("searching", !canSeeUser);
+  trackingDot.classList.toggle("waiting", canSeeUser && (!classStarted || !judging));
+  // "Warming up" was the first wording and it describes the app, which is not
+  // what the user needs to know — it reads as something still loading, and for
+  // thirty-five seconds that reads as broken. This says what is actually
+  // happening, and stays true if the detection is wrong about when the class
+  // begins.
+  Object.assign(diagnostic, {
+    videoTime: classVideo.currentTime,
+    playing: !classVideo.paused && !classVideo.ended,
+    startsAt: track ? track.startsAt : null,
+    classStarted, mode: instruction.mode, judging, watching,
+    candidates: asking.length, userSeen: !!user, framing,
+  });
+
+  // Ordered by what the student most needs to know. Not being in frame beats
+  // everything, including the class not having started: an app that reports
+  // "waiting for the class" to somebody standing out of shot has told them the
+  // one thing they cannot act on and withheld the one thing they can.
+  trackingLabel.textContent =
+    !user ? "Looking for you"
+    : framing === "cropped" ? "Step back"
+    : !classStarted ? "Waiting for the class"
+    : !following ? "Not following"
+    : judging ? "Tracking"
+    : instruction.mode === "reps" ? "Counting reps"
+    : instruction.mode === "settling" ? "Getting set"
+    : instruction.mode === "resting" ? "Resting"
+    : "Following along";
+
+  diagnostic.label = trackingLabel.textContent;
+  updateDebug();
+
+  recordFrame({
+    at: Math.round(now),
+    t: Number(classVideo.currentTime.toFixed(3)),
+    seen: canSeeUser,
+    framing,
+    // The landmarks themselves, which is the point: everything else here can be
+    // recomputed from them, and nothing else can replace them.
+    landmarks: user && user.landmarks
+      ? user.landmarks.map((p) => [round3(p.x), round3(p.y), round3(p.z ?? 0), round3(p.visibility ?? 1)])
+      : null,
+    world: user && user.world
+      ? user.world.map((p) => [round3(p.x), round3(p.y), round3(p.z ?? 0)]) : null,
+    judging, watching, following,
+    mode: instruction.mode,
+    state: verdict.state,
+    paused: classVideo.paused,
+    pausedForMissing,
+    severity: comparison ? round3(comparison.severity) : null,
+    disagreement: comparison ? round3(disagreementOf(comparison)) : null,
+    coverage: comparison ? round3(comparison.coverage) : null,
+    mirrored: comparison ? comparison.mirrored : null,
+    mirrorLocked: mirrorLock.value,
+    travel: round3(studentTravel), instructorTravel: round3(instructorTravel), keepingUp,
+    matchedAt: comparison && comparison.matchedAt != null ? round3(comparison.matchedAt) : null,
+    faults: comparison ? comparison.faults.slice(0, 3).map((f) => f.text) : [],
+    said: said ? said.text : null,
+    // What the rep tracker decided on this frame, if anything.
+    rep: lastRepEvent && lastRepEvent.recordedAt == null
+      ? (lastRepEvent.recordedAt = now, {
+          kind: lastRepEvent.kind,
+          ...Object.fromEntries(Object.entries(lastRepEvent.rep || lastRepEvent.top)
+            .map(([k, v]) => [k, typeof v === "number" ? round3(v) : v])),
+        })
+      : null,
+    repFocus: REPEATED ? repCoach.focus : null,
+    // What the speech engine did since the last row: whether a cue that was
+    // decided on was actually started, finished, or dropped.
+    speech: speechSinceLastRow(),
+  });
+
+  if (said) {
+    diagnostic.lastSaid = said.text;
+    speakOverClass(said.text, said.interrupt);
+    if (repSaid && repCoach.caption) {
+      repCaption = null;
+      showRepCaption(repCoach.caption);
+    } else {
+      if (repSaid) repCaption = null;
+      showCaption(said.text, repSaid ? 1800 : verdict.state === "ok" ? 2200 : 5000);
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Start and finish
+// ─────────────────────────────────────────────────────────────
+document.getElementById("btn-start").addEventListener("click", async () => {
+  voice.prime();                    // must be inside the tap, or iOS stays mute
+  startError.classList.remove("visible");
+
+  try {
+    await startCamera();
+  } catch (err) {
+    startError.textContent = cameraProblem(err);
+    startError.classList.add("visible");
+    return;
+  }
+
+  showScreen("screen-class");
+  setLoading("Getting ready…");
+  startWorker();
+
+  if (!track) {
+    try {
+      setLoading("Loading the class…");
+      track = await InstructorTrack.load();
+      // The instructor's words, if they have been transcribed. Optional on
+      // purpose: with no transcript the app judges from the instructor's body
+      // alone, which is what it did before it could read the instruction.
+      cues = await CueTrack.load().catch(() => null);
+      // The instructor's typical rep, measured off their own reps in the
+      // trace. Once, here: it is the same on every run.
+      if (REPEATED) repReference = referenceRep(track.frames, EXERCISE.from, EXERCISE.to);
+      if (!track.complete) {
+        showCaption(`Guidance is available for the first ${Math.round(track.seconds / 60)} minutes.`, 6000);
+      }
+    } catch (err) {
+      setLoading(err.message, null, true);
+      return;
+    }
+  }
+
+  // Straight to the exercise being demonstrated, with a few seconds of the
+  // instructor introducing it.
+  if (Number.isFinite(EXERCISE.announceAt)) {
+    try { classVideo.currentTime = EXERCISE.announceAt; } catch { /* not seekable yet */ }
+  }
+  running = true;
+  userPaused = false;
+  positioning = true;
+  framedSince = 0;
+  setPaused(true);
+  rafId = requestAnimationFrame(frame);
+});
+
+/**
+ * The exercise is over.
+ *
+ * Said out loud and then stopped, rather than letting the video run on into the
+ * next exercise — the app is only set up to coach this one, and continuing
+ * would mean watching somebody against a reference for a movement nobody has
+ * tuned it for.
+ */
+// Set until endClass runs. The frame loop keeps calling finishExercise every
+// frame until then, and each call used to restart the speech and queue
+// another endClass.
+let finishing = false;
+function finishExercise() {
+  if (finishing) return;
+  finishing = true;
+  voice.speak(`That's ${EXERCISE.name} done. Nice work.`, { interrupt: true });
+  showCaption(`${EXERCISE.name} complete`, 4000);
+  setTimeout(endClass, 2600);
+}
+
+function endClass() {
+  finishing = false;
+  flushRecording();
+  running = false;
+  positioning = true;
+  framedSince = 0;
+  if (rafId) cancelAnimationFrame(rafId);
+  classVideo.pause();
+  stopCamera();
+  if (worker) { worker.terminate(); worker = null; }
+  monitor.reset();
+  followMonitor.reset();
+  mirrorLock.reset();
+  motion.reset();
+  coach.reset();
+  resetReps();
+  verdicts.reset();
+  guidance = null;
+  zoomOut();
+  voice.cancel();
+  showScreen("screen-start");
+}
+
+classVideo.addEventListener("ended", () => endClass());
+
+// A class is a long time to leave a screen alone.
+let wakeLock = null;
+async function keepAwake() {
+  if (!("wakeLock" in navigator) || wakeLock) return;
+  try {
+    wakeLock = await navigator.wakeLock.request("screen");
+    wakeLock.addEventListener("release", () => { wakeLock = null; });
+  } catch { wakeLock = null; }
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && running) keepAwake();
+});
+document.getElementById("btn-start").addEventListener("click", keepAwake);
+
+
+if ("serviceWorker" in navigator && !FRESH) {
+  navigator.serviceWorker.register("sw.js").catch(() => {});
+}
+</script>
+</body>
+</html>

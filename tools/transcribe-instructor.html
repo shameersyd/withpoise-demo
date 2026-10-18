@@ -1,0 +1,99 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Transcribing the instructor</title>
+<!--
+  The instructor's words, with timestamps, produced offline and once.
+
+  Body tracking says what shape the instructor is in. It cannot say what they
+  are *asking for* — whether "stay here and breathe" or "now come up and switch
+  sides" — and that difference decides whether a student holding still is doing
+  the right thing or has stopped following. Geometry alone had to guess at it;
+  this is the thing that actually knows.
+
+  Whisper runs here in WebAssembly rather than on a server, for the same reason
+  the pose trace does: it is a once-per-video step, the output is identical on
+  every run, and nothing about the class should need a backend. Measured at
+  roughly 4x realtime on this machine, so a twenty-minute class takes about five
+  minutes.
+
+  The class is in Hinglish — Hindi and English mixed in the same sentence — so
+  the task is `translate`, which emits English whatever the input was. Keyword
+  spotting on the result needs one language, not two.
+-->
+<body>
+<script type="module">
+const post = (path, body) =>
+  fetch(path, { method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body) });
+const say = (message) => post("/__log", { message });
+
+const params = new URLSearchParams(location.search);
+const MODEL = params.get("model") || "onnx-community/whisper-base";
+// Transcribed in windows rather than one pass, so a long class reports progress
+// and an interrupted run leaves a usable file behind.
+const WINDOW = Number(params.get("window") || 120);
+// Whisper loses the thread at a window edge. The overlap is transcribed twice
+// and the duplicate dropped on timestamp, which costs a little time and saves
+// a sentence at every boundary.
+const OVERLAP = Number(params.get("overlap") || 3);
+
+try {
+  say("fetching the video");
+  const response = await fetch("/media/instructor.mp4");
+  if (!response.ok) throw new Error(`no video (${response.status})`);
+  const bytes = await response.arrayBuffer();
+
+  // 16 kHz mono is what Whisper wants, and decodeAudioData resamples to the
+  // context's rate for us. Decoding the whole class at once costs about 80 MB
+  // of float samples, which is cheaper than it sounds and far simpler than
+  // trying to slice an mp4 container.
+  const ctx = new OfflineAudioContext(1, 16000, 16000);
+  const audio = await ctx.decodeAudioData(bytes);
+  let pcm = audio.getChannelData(0);
+  if (audio.numberOfChannels > 1) {
+    const right = audio.getChannelData(1);
+    const mixed = new Float32Array(pcm.length);
+    for (let i = 0; i < pcm.length; i++) mixed[i] = (pcm[i] + right[i]) / 2;
+    pcm = mixed;
+  }
+  const duration = audio.duration;
+  say(`decoded ${duration.toFixed(0)}s of audio`);
+
+  const { pipeline } = await import("https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.5.1");
+  const asr = await pipeline("automatic-speech-recognition", MODEL,
+    { dtype: "q8", device: "wasm" });
+  say(`model ready: ${MODEL}`);
+
+  await post("/__begin", { duration, model: MODEL, window: WINDOW, overlap: OVERLAP });
+
+  const started = performance.now();
+  for (let from = 0; from < duration; from += WINDOW) {
+    const to = Math.min(duration, from + WINDOW + OVERLAP);
+    const slice = pcm.slice(Math.floor(from * 16000), Math.floor(to * 16000));
+    if (slice.length < 16000) break;
+
+    const out = await asr(slice, {
+      return_timestamps: true, chunk_length_s: 30, stride_length_s: 5,
+      task: "translate", language: "en",
+    });
+
+    // Timestamps come back relative to the slice.
+    const segments = (out.chunks || []).map((c) => ({
+      from: from + (c.timestamp[0] ?? 0),
+      to: c.timestamp[1] == null ? null : from + c.timestamp[1],
+      text: (c.text || "").trim(),
+    })).filter((s) => s.text);
+
+    await post("/__segments", { from, to, segments });
+    const done = Math.min(duration, from + WINDOW);
+    const rate = done / ((performance.now() - started) / 1000);
+    say(`${done.toFixed(0)}s / ${duration.toFixed(0)}s  (${rate.toFixed(1)}x realtime)`);
+  }
+  await post("/__done", { complete: true });
+  say("DONE");
+} catch (e) {
+  say(`ERROR ${e && e.message || e}`);
+  await post("/__done", { complete: false, error: String(e && e.message || e) });
+  say("DONE");
+}
+</script>

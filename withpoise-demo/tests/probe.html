@@ -1,0 +1,59 @@
+<!doctype html>
+<meta charset="utf-8"><title>decision probe</title>
+<!--
+  What is the app deciding, and why?
+
+  Loads the real index.html, starts the class, seeks the video to a given point
+  and reports the decision state. The fake camera has nobody in it, which is
+  exactly the case being investigated: a student whose body is not in frame.
+-->
+<body>
+<script>
+const out = [];
+const log = (m) => out.push(m);
+const report = () => { new Image().src = "/__probe?" + encodeURIComponent(out.join(" || ")); };
+
+const frame = document.createElement("iframe");
+frame.width = 1000; frame.height = 700;
+frame.src = "../index.html";
+document.body.appendChild(frame);
+
+const SEEK = Number(new URLSearchParams(location.search).get("seek") || 50);
+
+frame.onload = () => {
+  const win = frame.contentWindow, doc = frame.contentDocument;
+  win.addEventListener("error", (e) => log("UNCAUGHT " + (e.message || e.error)));
+  win.addEventListener("unhandledrejection", (e) => log("REJECTION " + (e.reason?.message || e.reason)));
+
+  const click = (id) => { const el = doc.getElementById(id); if (el) el.click(); return !!el; };
+  click("btn-safety-ok");
+  if (!click("btn-start")) { log("no start button"); return report(); }
+
+  let seeked = false, samples = 0;
+  const poll = setInterval(() => {
+    const d = win.__poise;
+    const video = doc.getElementById("class-video");
+    if (!d) { log("no diagnostic yet"); return; }
+
+    // Wait for inference to be running, then jump into the class.
+    if (!seeked && d.detections >= 2 && video && video.duration > 0) {
+      video.currentTime = SEEK;
+      video.play().catch((e) => log("play refused: " + e.message));
+      seeked = true;
+      log(`seeked to ${SEEK}s`);
+      return;
+    }
+    if (!seeked) return;
+
+    samples++;
+    if (samples % 6 === 0 || samples === 2) {
+      const video = doc.getElementById("class-video");
+      log(`t=${d.videoTime.toFixed(1)} ${video && video.paused ? "PAUSED" : "playing"} ` +
+          `startsAt=${d.startsAt} started=${d.classStarted} mode=${d.mode} ` +
+          `judging=${d.judging} cand=${d.candidates} userSeen=${d.userSeen} ` +
+          `following=${d.following} state=${d.state} label="${d.label}" said="${d.lastSaid}"`);
+    }
+    if (samples > 44) { clearInterval(poll); report(); }
+  }, 500);
+};
+</script>

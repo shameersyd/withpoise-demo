@@ -1,0 +1,104 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>withpoise-demo smoke test</title>
+<!--
+  Does the class actually start in a browser?
+
+  The jsc suite next to this file covers the comparison math and is blind to
+  everything the app needs to get as far as using it: the module worker, the
+  MediaPipe runtime, WebGL, the model download, the instructor trace, the camera
+  and nine hundred lines of interface wiring. The original app shipped a green
+  test suite for its entire history while the landmarker failed to start on
+  every run, which is what this shape of test exists to prevent.
+
+  It loads the real index.html in an iframe rather than reimplementing its
+  startup, because the startup is the thing under test. Chrome's fake camera
+  shows a rolling colour pattern with no person in it, so the verdict here is
+  "the pipeline runs and reports that it cannot see anybody" — which is the
+  whole path bar the landmarks themselves.
+-->
+<body>
+<script>
+const log = [];
+const failures = [];
+const note = (s) => log.push(s);
+const fail = (s) => { failures.push(s); log.push("FAIL " + s); };
+
+function report(verdict) {
+  const payload = [verdict, failures.join(" ;; "), log.join(" | ")].join("||");
+  new Image().src = "/__smoke?" + encodeURIComponent(payload);
+  setTimeout(() => { document.title = verdict; }, 50);
+}
+
+const frame = document.createElement("iframe");
+frame.width = 900; frame.height = 700;
+frame.src = "../index.html";
+document.body.appendChild(frame);
+
+const deadline = 70000;
+const began = Date.now();
+
+frame.onload = () => {
+  const win = frame.contentWindow, doc = frame.contentDocument;
+
+  // Anything thrown inside the app is a failure here, including the rejections
+  // that would otherwise be swallowed by the console.
+  win.addEventListener("error", (e) => fail("uncaught: " + (e.message || e.error)));
+  win.addEventListener("unhandledrejection", (e) =>
+    fail("unhandled rejection: " + (e.reason && e.reason.message || e.reason)));
+
+  const click = (id) => { const el = doc.getElementById(id); if (el) el.click(); return !!el; };
+
+  // The safety notice gates the start button on a first visit.
+  click("btn-safety-ok");
+
+  if (!click("btn-start")) return report("no start button — index.html did not render");
+  note("clicked start");
+
+  const started = Date.now();
+  const poll = setInterval(() => {
+    const waited = Date.now() - started;
+    const text = (doc.body.innerText || "").replace(/\s+/g, " ");
+    const err = (doc.getElementById("start-error") || {}).innerText || "";
+    const diag = win.__poise;
+
+    if (err.trim()) {
+      clearInterval(poll);
+      fail("the app refused to start: " + err.trim());
+      return report("start refused");
+    }
+    if (diag && diag.error) {
+      clearInterval(poll);
+      fail("pose detection failed: " + diag.error);
+      return report("detection failed");
+    }
+
+    // Completed inference passes are the only acceptable evidence.
+    //
+    // An earlier version of this file passed on the words "Step back so I can
+    // see you" being on screen, which the app says *before* the model has
+    // downloaded — it went green in a second, having proved only that the
+    // interface renders. Counting detections cannot be satisfied that way.
+    //
+    // The fake camera shows a rolling colour pattern, so finding no body in it
+    // is the correct outcome and is not checked for. What is checked is that
+    // frames went through the landmarker and came back.
+    if (diag && diag.detections >= 3) {
+      clearInterval(poll);
+      note("after " + waited + "ms: " + diag.detections + " inference passes, "
+        + diag.bodies + " with a body, " + Math.round(diag.inference) + "ms each"
+        + (diag.delegate ? ", " + diag.delegate : ""));
+      note("screen: " + text.slice(0, 160));
+      return report(failures.length ? "errors during startup" : "ok");
+    }
+
+    if (Date.now() - began > deadline) {
+      clearInterval(poll);
+      fail("inference never ran: " + (diag ? diag.detections + " passes in "
+        + Math.round((Date.now() - started) / 1000) + "s" : "no diagnostic on window")
+        + ". Last screen: " + text.slice(0, 240));
+      return report("timed out");
+    }
+  }, 500);
+};
+</script>

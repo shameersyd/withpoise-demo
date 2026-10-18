@@ -1,0 +1,209 @@
+<!doctype html>
+<meta charset="utf-8"><title>body probe</title>
+<!--
+  What does the app do when it can actually see somebody?
+
+  The gap every other test left. tests/run.sh checks the comparison without
+  running the app; smoke.sh runs the app but has no body to show it; probe.sh
+  runs the app against an empty room. None of them could tell whether the
+  pause, the zoom, the armature and the voice actually happen for a student who
+  is doing the class wrong — which is the entire product.
+
+  Pose detection needs a camera pointed at a person, which no automated test
+  has, so this feeds the app a body directly through the ?debug=1 test hook.
+  Everything downstream of the landmarks runs exactly as it does for real.
+
+  The body fed is the instructor's own, taken from the trace: standing still
+  while the class is mid jumping-jacks (a student who has stopped), or
+  following two seconds behind (a student doing fine).
+-->
+<body>
+<script type="module">
+// Sent as it happens rather than collected and reported at the end, so a run
+// that hangs still shows how far it got.
+const out = [];
+const log = (m) => { out.push(m); new Image().src = "/__probe?" + encodeURIComponent(String(m)); };
+const report = () => { new Image().src = "/__probe?" + encodeURIComponent("END"); };
+const params = new URLSearchParams(location.search);
+const SEEK = Number(params.get("seek") || 80);
+const MODE = params.get("mode") || "still";
+
+window.addEventListener("error", (e) => { out.push("PAGE ERROR " + (e.message || e.error)); report(); });
+window.addEventListener("unhandledrejection", (e) => {
+  out.push("PAGE REJECTION " + (e.reason?.message || e.reason)); report();
+});
+
+let InstructorTrack, track;
+try {
+  ({ InstructorTrack } = await import("../instructor.js"));
+  const response = await fetch("../media/instructor.json");
+  if (!response.ok) throw new Error(`trace fetch ${response.status}`);
+  track = new InstructorTrack(await response.json());
+  log(`trace loaded: ${track.frames.length} frames`);
+} catch (e) {
+  out.push("SETUP FAILED " + (e && e.message || e));
+  report();
+  throw e;
+}
+
+const frame = document.createElement("iframe");
+frame.width = 1000; frame.height = 700;
+frame.src = "../index.html?debug=1";
+document.body.appendChild(frame);
+
+const asResult = (sample) => sample && sample.world ? {
+  type: "result", detected: true,
+  landmarks: sample.image, world: sample.world, inference: 30,
+} : null;
+
+frame.onload = () => {
+  const win = frame.contentWindow, doc = frame.contentDocument;
+  win.addEventListener("error", (e) => log("UNCAUGHT " + (e.message || e.error)));
+  win.addEventListener("unhandledrejection", (e) => log("REJECTION " + (e.reason?.message || e.reason)));
+
+  const click = (id) => { const el = doc.getElementById(id); if (el) el.click(); return !!el; };
+  click("btn-safety-ok");
+  if (!click("btn-start")) { log("no start button"); return report(); }
+
+  // The pose a student makes by standing still: the instructor's own, from the
+  // introduction, before anybody is moving.
+  const still = asResult(track.at(25));
+
+  // Jumping jacks with the hands stopping at shoulder height — the commonest
+  // way to get one wrong. The instructor's own reps, a beat behind, bent.
+  //
+  // Or with the feet barely opening, the other common one.
+  const BENDS = {
+    "short-arms": (image) => {
+      const shoulders = (image[11].y + image[12].y) / 2;
+      for (const w of [15, 16]) image[w].y = Math.max(image[w].y, shoulders);
+    },
+    "narrow-feet": (image) => {
+      const centre = (image[23].x + image[24].x) / 2;
+      for (const a of [27, 28]) image[a].x = centre + (image[a].x - centre) * 0.35;
+    },
+  };
+  const bend = BENDS[MODE.replace(/-fix$/, "")];
+  const REPS = !!bend;
+  const shortArms = (sample) => {
+    if (!sample || !sample.image) return sample;
+    const image = sample.image.map((p) => ({ ...p }));
+    bend(image);
+    return { ...sample, image };
+  };
+  let fixedFrom = Infinity;
+  const snapshot = (name) => {
+    try {
+      const stage = doc.getElementById("stage");
+      const video = doc.getElementById("class-video");
+      const overlay = doc.getElementById("overlay");
+      const c = document.createElement("canvas");
+      c.width = overlay.width; c.height = overlay.height;
+      const g = c.getContext("2d");
+      g.drawImage(video, 0, 0, c.width, c.height);
+      g.drawImage(overlay, 0, 0);
+      fetch("/__snapshot?name=" + name, { method: "POST", body: c.toDataURL("image/png") });
+    } catch (e) { log("snapshot failed " + e.message); }
+  };
+  const paintedNow = () => {
+    try {
+      const canvas = doc.getElementById("overlay");
+      const { data } = canvas.getContext("2d").getImageData(0, 0, canvas.width, canvas.height);
+      let n = 0;
+      for (let i = 3; i < data.length; i += 4 * 97) if (data[i] > 8) n++;
+      return n;
+    } catch { return -1; }
+  };
+  if (REPS) {
+    // Fed at a phone camera's rate. The poll below is far too slow for a
+    // movement that repeats every 1.2 seconds.
+    let lastSaid = null, shots = 0, pauses = 0, wasPaused = false, heard = 0;
+    setInterval(() => {
+      const d = win.__poise, test = win.__poiseTest, video = doc.getElementById("class-video");
+      if (!d || !test || !seeked) return;
+      const t = video.currentTime;
+      const sample = track.at(Math.max(0, t - 0.3));
+      const asked = t >= fixedFrom ? sample : shortArms(sample);
+      test.feed(asResult(asked) || still);
+      const events = test.speech || [];
+      for (; heard < events.length; heard++) {
+        const e = events[heard];
+        log(`SPEECH ${e.what} "${e.text}"${e.error ? " " + e.error : ""} at t=${t.toFixed(2)}`);
+      }
+      if (d.lastSaid !== lastSaid) {
+        lastSaid = d.lastSaid;
+        log(`SAID at t=${t.toFixed(2)}: "${lastSaid}"`);
+      }
+      if (video.paused && !wasPaused && d.classStarted) { pauses++; log(`CLASS PAUSED at t=${t.toFixed(2)}`); }
+      wasPaused = video.paused;
+      // The first marker, and the first after the fix.
+      if (paintedNow() > 20 && (shots === 0 || (shots === 1 && t >= fixedFrom))) {
+        shots++;
+        snapshot(`marker-${shots}-t${t.toFixed(1)}.png`);
+      }
+    }, 66);
+  }
+
+  let seeked = false, samples = 0, corrected = false;
+  const poll = setInterval(() => {
+    const d = win.__poise, test = win.__poiseTest, video = doc.getElementById("class-video");
+    if (!d || !test) return;
+
+    if (!seeked) {
+      if (!(d.detections >= 1 && video && video.duration > 0)) return;
+      video.currentTime = SEEK;
+      video.play().catch(() => {});
+      seeked = true;
+      log(`seeked to ${SEEK}s, feeding a "${MODE}" student`);
+      return;
+    }
+
+    // Keep the body fresh — the app discards a stale detection.
+    const t = video.currentTime;
+    if (REPS) { /* fed above */ }
+    else if (MODE === "still" || (MODE === "correct-later" && !corrected)) test.feed(still);
+    else if (MODE === "correct-later") {
+      // A student who has started following keeps going even if the class is
+      // stopped — the recorded session shows exactly that — so their reps run
+      // on the clock, not on the frozen video.
+      if (!corrected.at) corrected = { at: performance.now() };
+      const along = 80 + ((performance.now() - corrected.at) / 1000) % 20;
+      test.feed(asResult(track.at(along)) || still);
+    }
+    else test.feed(asResult(track.at(Math.max(0, t - 0.3))) || still);
+
+    samples++;
+    if (REPS && MODE.endsWith("-fix") && samples === 30) {
+      fixedFrom = t;
+      log("--- student fixes it ---");
+    }
+    // Half way through, the student starts following properly.
+    if (MODE === "correct-later" && samples === 24) {
+      corrected = true;
+      log("--- student starts following correctly ---");
+    }
+    if (samples % 3 === 0) {
+      // Is anything actually drawn? The armature is the whole visual half of
+      // the product and no test had ever looked at a pixel of it — the
+      // geometry is unit-tested, the drawing was not.
+      let painted = 0;
+      try {
+        const canvas = doc.getElementById("overlay");
+        const ctx = canvas.getContext("2d");
+        const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        for (let i = 3; i < data.length; i += 4 * 97) if (data[i] > 8) painted++;
+      } catch (e) { painted = -1; }
+      log(`t=${t.toFixed(1)} ${video.paused ? "PAUSED" : "playing"} ` +
+          `zoom=${!!doc.querySelector("#stage[style*=scale]")} drawn=${painted} ` +
+          `seen=${d.userSeen} following=${d.following} state=${d.state} ` +
+          `off=${d.disagreement == null ? "—" : d.disagreement.toFixed(2)} ` +
+          `sev=${d.severity == null ? "—" : d.severity.toFixed(2)} ` +
+          `label="${d.label}" said="${d.lastSaid}"` +
+          ` caption=${(() => { const c = doc.getElementById("caption"); return c.classList.contains("visible") ? `"${c.textContent}"` : "none"; })()}` +
+          ` muted=${video.muted}` +
+          (REPS ? ` | ${(doc.getElementById("debug").textContent.split("\n").find((l) => l.startsWith("reps")) || "").trim()}` : ""));
+    }
+    if (samples > 60) { clearInterval(poll); test.stop(); report(); }
+  }, 300);
+};
+</script>
