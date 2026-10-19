@@ -23,6 +23,7 @@
 #   tests/probe.sh 80 probe-body short-arms      # jumping jacks, hands only to the shoulders
 #   tests/probe.sh 80 probe-body short-arms-fix  # …who then reaches all the way up
 #   tests/probe.sh 80 probe-body narrow-feet-fix # the same for feet that barely open
+#   tests/probe.sh 74 probe-body replay-session-short-arms  # a recorded session, fed back row by row
 set -e
 cd "$(dirname "$0")/../.."
 

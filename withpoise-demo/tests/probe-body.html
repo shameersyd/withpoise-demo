@@ -46,6 +46,22 @@ try {
   throw e;
 }
 
+// "replay-<fixture>": a recorded student, row by row against the class's own
+// clock, instead of the instructor bent into a fault. The truest picture of
+// what somebody doing it wrong will see.
+let replayRows = null;
+if (MODE.startsWith("replay-")) {
+  const raw = await (await fetch(`fixtures/${MODE.slice(7)}.json`)).json();
+  replayRows = raw.rows.map(([at, t, paused, ...flat]) => {
+    const image = Array.from({ length: 33 }, () => ({ x: 0, y: 0, z: 0, visibility: 0 }));
+    raw.keep.forEach((index, i) => {
+      image[index] = { x: flat[i * 3], y: flat[i * 3 + 1], z: 0, visibility: flat[i * 3 + 2] };
+    });
+    return { t, image };
+  });
+  log(`replaying ${replayRows.length} recorded results`);
+}
+
 const frame = document.createElement("iframe");
 frame.width = 1000; frame.height = 700;
 frame.src = "../index.html?debug=1";
@@ -84,7 +100,12 @@ frame.onload = () => {
     },
   };
   const bend = BENDS[MODE.replace(/-fix$/, "")];
-  const REPS = !!bend;
+  const REPS = !!bend || !!replayRows;
+  const recordedAt = (t) => {
+    let best = null;
+    for (const row of replayRows) if (row.t <= t) best = row; else break;
+    return best;
+  };
   const shortArms = (sample) => {
     if (!sample || !sample.image) return sample;
     const image = sample.image.map((p) => ({ ...p }));
@@ -117,14 +138,23 @@ frame.onload = () => {
   if (REPS) {
     // Fed at a phone camera's rate. The poll below is far too slow for a
     // movement that repeats every 1.2 seconds.
-    let lastSaid = null, shots = 0, pauses = 0, wasPaused = false, heard = 0;
+    let lastSaid = null, shots = 0, pauses = 0, wasPaused = false, heard = 0, lastShotAt = 0;
     setInterval(() => {
       const d = win.__poise, test = win.__poiseTest, video = doc.getElementById("class-video");
       if (!d || !test || !seeked) return;
       const t = video.currentTime;
       const sample = track.at(Math.max(0, t - 0.3));
-      const asked = t >= fixedFrom ? sample : shortArms(sample);
-      test.feed(asResult(asked) || still);
+      if (replayRows) {
+        // The recording kept the image landmarks only; the instructor's 3D
+        // body stands in for the student's, which nothing about reps reads.
+        const row = recordedAt(t);
+        test.feed(row && sample && sample.world
+          ? { type: "result", detected: true, landmarks: row.image, world: sample.world, inference: 30 }
+          : still);
+      } else {
+        const asked = t >= fixedFrom ? sample : shortArms(sample);
+        test.feed(asResult(asked) || still);
+      }
       const events = test.speech || [];
       for (; heard < events.length; heard++) {
         const e = events[heard];
@@ -137,7 +167,9 @@ frame.onload = () => {
       if (video.paused && !wasPaused && d.classStarted) { pauses++; log(`CLASS PAUSED at t=${t.toFixed(2)}`); }
       wasPaused = video.paused;
       // The first marker, and the first after the fix.
-      if (paintedNow() > 20 && (shots === 0 || (shots === 1 && t >= fixedFrom))) {
+      if (paintedNow() > 20 && (shots === 0 || (shots === 1 && t >= fixedFrom)
+          || (replayRows && shots < 6 && t - (lastShotAt || 0) > 2.5))) {
+        lastShotAt = t;
         shots++;
         snapshot(`marker-${shots}-t${t.toFixed(1)}.png`);
       }
@@ -155,6 +187,7 @@ frame.onload = () => {
       video.play().catch(() => {});
       seeked = true;
       log(`seeked to ${SEEK}s, feeding a "${MODE}" student`);
+      { const sv = doc.getElementById("self-video"); log(`camera ${sv.videoWidth}x${sv.videoHeight}, class ${video.videoWidth}x${video.videoHeight}`); }
       return;
     }
 
