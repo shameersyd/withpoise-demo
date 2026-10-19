@@ -3,8 +3,9 @@ import { suite, test, assert, assertEqual, assertClose } from "./harness.js";
 import { LM } from "../pose-core.js";
 import { InstructorTrack } from "../instructor.js";
 import {
-  RepTracker, repSignals, referenceRep, repFaults, FAULTS, anchorOf,
+  RepTracker, repSignals, referenceRep, referenceMoments, nearestTime, repFaults, FAULTS,
 } from "../reps.js";
+import { transferPose } from "../armature.js";
 import { RepCoach, REP_LINES, REP_CUE_GAP_MS, REPEAT_EVERY_REPS } from "../coaching.js";
 import { CURRENT as EXERCISE, isRepeated } from "../exercise.js";
 
@@ -279,13 +280,70 @@ test("and none of their full reps reads as a fault", () => {
   }
 });
 
-test("the anchor for the marker sits on the instructor", () => {
-  const anchor = anchorOf(track.window(90, 1.4).map((f) => f.image));
-  assert(anchor, "no anchor");
-  const here = track.at(90).image;
-  assertClose(anchor.cx, centre(here), 0.05, "centre");
-  assert(anchor.torso > 0.05 && anchor.width > 0.02, "a body this small is not the instructor");
-  assert(anchor.ankleY > anchor.shoulderY + anchor.torso, "feet above the hips");
+suite("repetitions — the stick figures");
+
+const moments = referenceMoments(track.frames, EXERCISE.from, EXERCISE.to);
+const ASPECT = 16 / 9;
+
+test("the instructor's tops and bottoms are found, one per rep", () => {
+  assert(Math.abs(moments.tops.length - reference.reps) <= 1,
+    `${moments.tops.length} tops for ${reference.reps} reps`);
+  assert(Math.abs(moments.bottoms.length - reference.reps) <= 1,
+    `${moments.bottoms.length} bottoms for ${reference.reps} reps`);
+  // At a top the hands are above the shoulders; at a bottom, below the hips.
+  for (const t of moments.tops) {
+    const r = repSignals(track.at(t).image).reach;
+    assert(r > 0.3, `top at ${t.toFixed(2)}s reaches only ${r.toFixed(2)}`);
+  }
+  for (const t of moments.bottoms) {
+    const r = repSignals(track.at(t).image).reach;
+    assert(r < -0.5, `bottom at ${t.toFixed(2)}s reaches ${r.toFixed(2)}`);
+  }
+  assertClose(nearestTime([1, 2, 3], 2.4), 2, 1e-9, "nearest");
+});
+
+test("the instructor's own top, carried onto itself, lands on itself", () => {
+  const image = track.at(nearestTime(moments.tops, 90)).image;
+  const figure = transferPose(image, ASPECT, image, ASPECT, false);
+  for (const joint of ["left_wrist", "right_wrist", "left_ankle", "right_ankle"]) {
+    assertClose(figure[joint].x, image[LM[joint]].x, 0.01, `${joint} x`);
+    assertClose(figure[joint].y, image[LM[joint]].y, 0.01, `${joint} y`);
+  }
+});
+
+test("short arms show as hands at the shoulders, on the instructor's body", () => {
+  const top = track.at(nearestTime(moments.tops, 90)).image;
+  const figure = transferPose(BEND.shortArms(top), ASPECT, top, ASPECT, true);
+  const shoulder = shoulderY(top);
+  for (const wrist of ["left_wrist", "right_wrist"]) {
+    // Image y grows downward: the instructor's hands are well above the
+    // shoulders, the student's figure's are not.
+    assert(top[LM[wrist]].y < shoulder - 0.05, "the instructor's hands are up");
+    assert(figure[wrist].y > shoulder - 0.03, `${wrist} drawn at ${figure[wrist].y.toFixed(2)}`);
+  }
+  // Same hips, so the two figures stand in one place.
+  assertClose(figure.left_hip.x, top[LM.left_hip].x, 0.01, "hips");
+});
+
+test("mirrored, the student's low left arm is drawn on the screen's left", () => {
+  const top = track.at(nearestTime(moments.tops, 90)).image;
+  const figure = transferPose(BEND.lowLeftArm(top), ASPECT, top, ASPECT, true);
+  const wrists = ["left_wrist", "right_wrist"].map((w) => figure[w]);
+  const low = wrists.reduce((a, b) => (a.y > b.y ? a : b));
+  const high = wrists.reduce((a, b) => (a.y > b.y ? b : a));
+  assert(low.x < high.x, `low hand at x=${low.x.toFixed(2)}, high at x=${high.x.toFixed(2)}`);
+});
+
+test("a phone held upright is not drawn stretched", () => {
+  // The same body in a portrait frame: x squeezed into a narrower picture.
+  const top = track.at(nearestTime(moments.tops, 90)).image;
+  const PORTRAIT = 9 / 16;
+  const squeezed = top.map((p) => p && { ...p, x: 0.5 + (p.x - 0.5) * (ASPECT / PORTRAIT) });
+  const figure = transferPose(squeezed, PORTRAIT, top, ASPECT, false);
+  for (const joint of ["left_wrist", "right_wrist", "left_ankle", "right_ankle"]) {
+    assertClose(figure[joint].x, top[LM[joint]].x, 0.01, `${joint} x`);
+    assertClose(figure[joint].y, top[LM[joint]].y, 0.01, `${joint} y`);
+  }
 });
 
 suite("repetitions — three sets by a real student, 2026-10-17");

@@ -341,7 +341,7 @@
  * Shown in the ?debug=1 panel. If that panel does not appear at all, the device
  * is running a build from before it existed, and ?fresh=1 is the way out.
  */
-const BUILD = "2026-10-17c · a voice on the Mac";
+const BUILD = "2026-10-18a · stick figures for reps";
 
 /**
  * ?fresh=1 — throw away the service worker and every cache, then reload.
@@ -378,8 +378,10 @@ import {
 import { CueTrack } from "./cues.js";
 import { CURRENT as EXERCISE, withinExercise, exerciseOver, isRepeated } from "./exercise.js";
 import { FollowCoach, LINES, MISSING_PAUSE_MS, RepCoach } from "./coaching.js";
-import { RepTracker, repSignals, referenceRep, repFaults, FAULTS, anchorOf } from "./reps.js";
-import { buildFollowerPoints, instructorPoints, SEGMENT_END } from "./armature.js";
+import {
+  RepTracker, repSignals, referenceRep, referenceMoments, nearestTime, repFaults, FAULTS,
+} from "./reps.js";
+import { buildFollowerPoints, instructorPoints, SEGMENT_END, transferPose } from "./armature.js";
 import { Voice } from "./voice.js";
 import { FrameBudget } from "./pacing.js";
 
@@ -596,6 +598,8 @@ const REPEATED = isRepeated(EXERCISE);
 const repTracker = new RepTracker();
 const repCoach = new RepCoach(FAULTS);
 let repReference = null;       // the instructor's typical rep
+let repMoments = null;         // when the instructor was at each top and bottom
+const repPoses = [];           // the student's recent bodies, to draw a rep's top
 let repFedAt = 0;              // the last worker result fed to the tracker
 let repMarker = null;          // what is being shown at the top of a rep
 let lastRepEvent = null;       // for the debug panel
@@ -1009,14 +1013,15 @@ function drawGuidance(size, now) {
 // ─────────────────────────────────────────────────────────────
 // The rep marker
 //
-// At the top of each rep while a fault is being coached: where this rep got to,
-// drawn on the instructor's body, against where the instructor's own reps get
-// to. Held for most of a rep and then faded, so that while a fault is being
+// At the top of each rep while a fault is being coached: the student's body at
+// that point in their rep, drawn as an armature on the instructor's, against
+// the instructor's own body at the same point in theirs. Held for most of a rep and then faded, so that while a fault is being
 // coached it is on screen nearly all the time: at 650ms it flashed and was gone
 // before a student mid-jump could look up at it.
 //
-// The student's measures are in their own body units (see reps.js), so they
-// map onto the instructor by the instructor's own torso and shoulders. The
+// The student's body carries over as the direction of each limb, rebuilt at
+// the instructor's limb lengths (see transferPose in armature.js), so a
+// different build or distance from the camera does not show as a fault. The
 // student's left is drawn on the screen's left, which is the side they see
 // themselves raise when they look at it.
 // ─────────────────────────────────────────────────────────────
@@ -1027,6 +1032,7 @@ function resetReps() {
   repTracker.reset();
   repCoach.reset();
   repMarker = null;
+  repPoses.length = 0;
   lastRepEvent = null;
   if (repCaption) hideCaption();
   repCaption = null;
@@ -1053,86 +1059,75 @@ function repDebugLine() {
     (repReference ? "" : "  NO REFERENCE");
 }
 
+/**
+ * The two bodies a rep marker draws, fixed when it is made.
+ *
+ * Both at the same point in a rep: the top for most faults, the bottom for the
+ * two that are about how a rep ends. The student's is their own body at that
+ * moment, rebuilt on the instructor's — the same armature held poses get —
+ * and the instructor's is theirs at their nearest top or bottom in the video,
+ * not wherever the video is now: a reference caught mid-jump is not one.
+ */
+const BOTTOM_FAULTS = new Set(["feet-in", "arms-down"]);
+const MARKER_JOINTS = {
+  "arms-up": ["left_wrist", "right_wrist"],
+  "arms-down": ["left_wrist", "right_wrist"],
+  "arms-even": ["left_wrist", "right_wrist"],
+  "feet-wide": ["left_ankle", "right_ankle"],
+  "feet-in": ["left_ankle", "right_ankle"],
+  "together": ["left_ankle", "right_ankle"],
+};
+
+function poseAt(t) {
+  let best = null;
+  for (const pose of repPoses) {
+    if (!best || Math.abs(pose.t - t) < Math.abs(best.t - t)) best = pose;
+  }
+  return best && Math.abs(best.t - t) <= 0.25 ? best.image : null;
+}
+
+function markerFigure(marker, now) {
+  const bottom = BOTTOM_FAULTS.has(marker.fault);
+  const studentAt = bottom ? marker.rep && marker.rep.end : marker.top && marker.top.topAt;
+  const studentImage = studentAt != null ? poseAt(studentAt) : null;
+  const moments = repMoments ? (bottom ? repMoments.bottoms : repMoments.tops) : [];
+  const instructorAt = nearestTime(moments, classVideo.currentTime);
+  const instructor = instructorAt != null && track ? track.at(instructorAt) : null;
+  if (!studentImage || !instructor || !instructor.image) return null;
+
+  const aspect = (video, fallback) =>
+    video.videoWidth && video.videoHeight ? video.videoWidth / video.videoHeight : fallback;
+  const student = transferPose(studentImage, aspect(selfVideo, 16 / 9),
+    instructor.image, aspect(classVideo, 16 / 9), true);
+  if (!student) return null;
+  return { ...marker, shownAt: now, reference: instructorPoints(instructor.image), student };
+}
+
 function drawRepMarker(size, now) {
-  if (!repMarker || !repReference || !track) return;
+  if (!repMarker) return;
   const age = now - repMarker.shownAt;
   if (age > MARKER_SOLID_MS + MARKER_FADE_MS) { repMarker = null; return; }
 
-  const anchor = anchorOf(track.window(classVideo.currentTime, 1.4).map((f) => f.image));
-  if (!anchor) return;
-
   const resolved = getComputedStyle(document.documentElement);
   const colourOf = (token) => resolved.getPropertyValue(token).trim();
-  const target = colourOf("--reference");
-  const yours = colourOf(repMarker.state === "fixed" ? "--right" : "--wrong");
-  const { cx, shoulderY, torso, width, ankleY } = anchor;
-  const yOf = (reach) => shoulderY - reach * torso;
-  const top = repMarker.top || {};
-  const rep = repMarker.rep || {};
+  const wrong = repMarker.state !== "fixed";
+  const { reference, student } = repMarker;
 
   ctx.save();
   ctx.globalAlpha = age < MARKER_SOLID_MS ? 1 : 1 - (age - MARKER_SOLID_MS) / MARKER_FADE_MS;
-
-  const line = (x0, x1, y, colour) => {
-    const a = toStage({ x: x0, y }, size), b = toStage({ x: x1, y }, size);
-    ctx.lineCap = "round";
-    ctx.strokeStyle = "rgba(255,255,255,0.9)"; ctx.lineWidth = 9;
-    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
-    ctx.strokeStyle = colour; ctx.lineWidth = 5;
-    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
-  };
-  const tick = (x, y, colour) => {
-    const half = torso * 0.32;
-    const a = toStage({ x, y: y - half }, size), b = toStage({ x, y: y + half }, size);
-    ctx.lineCap = "round";
-    ctx.strokeStyle = "rgba(255,255,255,0.9)"; ctx.lineWidth = 9;
-    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
-    ctx.strokeStyle = colour; ctx.lineWidth = 5;
-    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
-  };
-  const wrong = repMarker.state !== "fixed";
-
-  // The arms, as a level: the instructor's reach and this rep's.
-  const arms = (want, got) => {
-    if (got == null) return;
-    const half = width * 0.85;
-    line(cx - half, cx + half, yOf(want), target);
-    line(cx - half * 0.8, cx + half * 0.8, yOf(got), yours);
-    if (wrong) drawArrow({ x: cx, y: yOf(got) }, { x: cx, y: yOf(want) }, size, yours);
-  };
-  // The feet, as a pair of marks at ankle height: how far apart they should
-  // be and how far apart they were.
-  const feet = (want, got) => {
-    if (got == null) return;
-    const w = (f) => (f * width) / 2;
-    tick(cx - w(want), ankleY, target); tick(cx + w(want), ankleY, target);
-    tick(cx - w(got), ankleY, yours); tick(cx + w(got), ankleY, yours);
-    if (wrong) {
-      drawArrow({ x: cx - w(got), y: ankleY }, { x: cx - w(want), y: ankleY }, size, yours);
-      drawArrow({ x: cx + w(got), y: ankleY }, { x: cx + w(want), y: ankleY }, size, yours);
-    }
-  };
-
-  switch (repMarker.fault) {
-    case "arms-up": arms(repReference.reach, top.reach); break;
-    case "arms-down": arms(repReference.reachBottom, rep.reachBottom); break;
-    case "feet-wide": feet(repReference.feetTop, top.feetTop); break;
-    case "feet-in": feet(repReference.feetBottom, rep.feetBottom); break;
-    case "together":
-      // Where the feet were when the hands were up.
-      feet(repReference.feetTop, top.feetAtArms ?? rep.feetAtArms);
-      break;
-    case "arms-even": {
-      if (top.reachL == null || top.reachR == null) break;
-      const half = width * 0.4;
-      for (const [x, got] of [[cx - width * 0.75, top.reachL], [cx + width * 0.75, top.reachR]]) {
-        line(x - half, x + half, yOf(repMarker.state === "fixed" ? got : repReference.reach), target);
-        line(x - half * 0.8, x + half * 0.8, yOf(got), yours);
-        if (wrong && got < repReference.reach - 0.15) {
-          drawArrow({ x, y: yOf(got) }, { x, y: yOf(repReference.reach) }, size, yours);
-        }
+  // As for a held pose: the instructor underneath, the student over them.
+  strokeBones(reference, size, {
+    colour: colourOf("--reference"), width: 5, halo: "rgba(255,255,255,0.9)",
+  });
+  strokeBones(student, size, {
+    colour: colourOf(wrong ? "--wrong" : "--right"), width: 4.5,
+    halo: "rgba(255,255,255,0.85)",
+  });
+  if (wrong) {
+    for (const joint of MARKER_JOINTS[repMarker.fault] || []) {
+      if (student[joint] && reference[joint]) {
+        drawArrow(student[joint], reference[joint], size, colourOf("--wrong"));
       }
-      break;
     }
   }
   ctx.restore();
@@ -1470,6 +1465,8 @@ function frame(now) {
   let repSaid = null;
   if (REPEATED && classStarted && canSeeUser && latest && latest.at !== repFedAt) {
     repFedAt = latest.at;
+    repPoses.push({ t: latest.at / 1000, image: user.landmarks });
+    while (repPoses.length && repPoses[0].t < latest.at / 1000 - 5) repPoses.shift();
     const event = repTracker.observe(latest.at / 1000, repSignals(user.landmarks));
     if (event) lastRepEvent = event;
     const coaching = repReference && following && !classVideo.paused && !zoomed;
@@ -1477,7 +1474,7 @@ function frame(now) {
       repCoach.rep(event.rep, repFaults(event.rep, repReference));
     } else if (event && event.kind === "top" && coaching) {
       const decision = repCoach.top(event.top, repFaults(event.top, repReference), now);
-      if (decision.marker) repMarker = { ...decision.marker, shownAt: now };
+      if (decision.marker) repMarker = markerFigure(decision.marker, now);
       if (decision.say) repSaid = decision.say;
     }
   }
@@ -1633,7 +1630,10 @@ document.getElementById("btn-start").addEventListener("click", async () => {
       cues = await CueTrack.load().catch(() => null);
       // The instructor's typical rep, measured off their own reps in the
       // trace. Once, here: it is the same on every run.
-      if (REPEATED) repReference = referenceRep(track.frames, EXERCISE.from, EXERCISE.to);
+      if (REPEATED) {
+        repReference = referenceRep(track.frames, EXERCISE.from, EXERCISE.to);
+        repMoments = referenceMoments(track.frames, EXERCISE.from, EXERCISE.to);
+      }
       if (!track.complete) {
         showCaption(`Guidance is available for the first ${Math.round(track.seconds / 60)} minutes.`, 6000);
       }

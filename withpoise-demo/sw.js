@@ -1,5 +1,5 @@
 // Bump when the app shell changes.
-const APP_CACHE = "withpoise-demo-v7";
+const APP_CACHE = "withpoise-demo-v8";
 
 // Versioned apart from the shell: this holds the MediaPipe runtime and a model
 // of several megabytes, and tying it to the app version would re-download them

@@ -201,9 +201,9 @@ What the student gets (`RepCoach` in `coaching.js`):
 |---|---|
 | reps look like the instructor's | nothing |
 | a fault in 2 of the last 3 reps | a short cue, said at the top of a rep so it is heard on the way down: *"Arms all the way up."*, *"Jump your feet wider."*, *"Arms and feet together."*. The class's sound is muted while it is said, and the cue stays up as a caption until it is fixed |
-| at the top of every rep after that | a marker on the instructor for about a second and a half: their reach (black) against yours (red), with an arrow between |
+| at the top of every rep after that | for about a second and a half, two stick figures on the instructor, as for a held pose: the instructor's body at the top of their rep (black) and yours at the top of yours (red), rebuilt at the instructor's size, with arrows from your hands or feet to theirs. Mirrored, so your left is on the screen's left |
 | every 3 reps without a fix | said again, alternating with a second wording (*"Reach higher — hands above your head."*), never closer than 3.5 seconds |
-| the first rep that gets there | *"That's it."*, and the marker flashes green |
+| the first rep that gets there | *"That's it."*, and your figure turns green |
 | feet left apart at the bottom, arms not all the way down | marker only, never said: real, but minor next to the others |
 
 The only pause left is for a student who has stopped moving altogether. That is

@@ -322,6 +322,31 @@ export class RepTracker {
 }
 
 /**
+ * When the instructor was at the top of each rep, and at the bottom, in video
+ * time — so the guidance can show their body at the same point in the rep as
+ * the student's, rather than wherever the video happens to be.
+ */
+export function referenceMoments(frames, from, to) {
+  const tracker = new RepTracker();
+  const tops = [], bottoms = [];
+  for (const frame of frames) {
+    if (frame.t < from - 2 || frame.t > to) continue;
+    const event = tracker.observe(frame.t, repSignals(frame.image));
+    if (!event) continue;
+    if (event.kind === "top" && event.top.start >= from) tops.push(event.top.topAt);
+    if (event.kind === "rep" && event.rep.start >= from) bottoms.push(event.rep.end);
+  }
+  return { tops, bottoms };
+}
+
+/** The time in `times` closest to `t`, or null. */
+export function nearestTime(times, t) {
+  let best = null;
+  for (const x of times) if (best == null || Math.abs(x - t) < Math.abs(best - t)) best = x;
+  return best;
+}
+
+/**
  * The instructor's typical rep, from their trace: the median of each measure
  * across every rep they did between `from` and `to`.
  *
@@ -444,44 +469,4 @@ export function repFaults(rep, ref) {
   const out = {};
   for (const fault of FAULTS) out[fault.id] = ref ? fault.test(rep, ref) : null;
   return out;
-}
-
-/**
- * Where to draw a rep's numbers on the instructor: their body's scale and
- * position, steadied over the last rep or so.
- *
- * Steadied because the instructor is jumping. A marker pinned to their
- * shoulders this frame bounces with them, and a target line that moves is
- * not a target. The median over a rep sits still while they move under it.
- *
- * `images` are the instructor's recent image landmarks. Returns null if too
- * few of them show the body.
- */
-export function anchorOf(images) {
-  const rows = [];
-  for (const image of images) {
-    if (!image) continue;
-    const ls = image[LM.left_shoulder], rs = image[LM.right_shoulder];
-    const lh = image[LM.left_hip], rh = image[LM.right_hip];
-    const la = image[LM.left_ankle], ra = image[LM.right_ankle];
-    if (![ls, rs, lh, rh].every(seen)) continue;
-    const shoulders = mid(ls, rs), hips = mid(lh, rh);
-    rows.push({
-      cx: (shoulders.x + hips.x) / 2,
-      shoulderY: shoulders.y,
-      torso: hips.y - shoulders.y,
-      width: Math.abs(ls.x - rs.x),
-      ankleY: seen(la) && seen(ra) ? (la.y + ra.y) / 2 : null,
-    });
-  }
-  if (rows.length < 2) return null;
-  const pick = (key) => median(rows.map((r) => r[key]));
-  const anchor = {
-    cx: pick("cx"), shoulderY: pick("shoulderY"), torso: pick("torso"),
-    width: pick("width"), ankleY: pick("ankleY"),
-  };
-  // No ankles in shot: put the feet where a standing body's feet are, about
-  // two and a half torso lengths below the shoulders.
-  if (anchor.ankleY == null) anchor.ankleY = anchor.shoulderY + anchor.torso * 2.5;
-  return anchor;
 }

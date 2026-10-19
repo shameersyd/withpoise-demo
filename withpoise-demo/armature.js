@@ -123,3 +123,73 @@ export function buildFollowerPoints(directions, image, mirrored = false) {
   }
   return out;
 }
+
+/**
+ * Each segment's direction in the body's own 2D frame, read off a picture of
+ * it: x toward the body's left, y up the spine. A segment with an end the
+ * camera could not see is left out, and is then not drawn.
+ *
+ * `points` must be in square units — x and y on the same scale — or every
+ * angle is stretched by the frame's aspect ratio.
+ */
+export function imageDirections(points, minVisibility = 0.5) {
+  const frame = imageFrame(points);
+  if (!frame) return null;
+  const { up, side } = frame;
+  const seen = (p) => !!p && (p.visibility ?? 1) >= minVisibility;
+  const direction = (from, to) => {
+    if (!seen(from) || !seen(to)) return null;
+    const v = { x: to.x - from.x, y: to.y - from.y };
+    const x = v.x * side.x + v.y * side.y;
+    const y = v.x * up.x + v.y * up.y;
+    const length = Math.hypot(x, y);
+    return length > 1e-9 ? { x: x / length, y: y / length } : null;
+  };
+  const mid = (a, b) => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
+  const out = {
+    torso: direction(mid(points.left_hip, points.right_hip),
+                     mid(points.left_shoulder, points.right_shoulder)),
+  };
+  for (const which of ["left", "right"]) {
+    out[`upper_arm_${which}`] = direction(points[`${which}_shoulder`], points[`${which}_elbow`]);
+    out[`forearm_${which}`] = direction(points[`${which}_elbow`], points[`${which}_wrist`]);
+    out[`thigh_${which}`] = direction(points[`${which}_hip`], points[`${which}_knee`]);
+    out[`shin_${which}`] = direction(points[`${which}_knee`], points[`${which}_ankle`]);
+  }
+  return out;
+}
+
+/**
+ * One person's pose, from a picture of them, rebuilt on another person's body
+ * in another picture — the same transfer as buildFollowerPoints, for when only
+ * the picture is to hand and not the camera's 3D estimate.
+ *
+ * `fromImage` and `ontoImage` are landmark arrays in their own frames'
+ * normalised coordinates; `fromAspect` and `ontoAspect` are those frames'
+ * width / height, so a phone held upright and a widescreen class compare.
+ * Returns points in `ontoImage`'s normalised coordinates, or null.
+ *
+ * `mirrored` swaps sides as well as flipping them, so each of the student's
+ * limbs lands on the instructor limb that is on the same side of the screen.
+ */
+export function transferPose(fromImage, fromAspect, ontoImage, ontoAspect, mirrored = false) {
+  if (!fromImage || !ontoImage) return null;
+  const square = (image, aspect) => image.map((p) => p && { ...p, x: p.x * aspect });
+  let directions = imageDirections(instructorPoints(square(fromImage, fromAspect)));
+  // As in a mirror: the student's left arm is drawn as the instructor's right,
+  // which is on the screen's left — the side the student sees as their own.
+  if (directions && mirrored) {
+    const swapped = {};
+    for (const [name, d] of Object.entries(directions)) {
+      const other = name.endsWith("_left") ? name.replace(/_left$/, "_right")
+        : name.endsWith("_right") ? name.replace(/_right$/, "_left") : name;
+      swapped[other] = d && { x: -d.x, y: d.y };
+    }
+    directions = swapped;
+  }
+  const built = buildFollowerPoints(directions, square(ontoImage, ontoAspect));
+  if (!built) return null;
+  const out = {};
+  for (const [name, p] of Object.entries(built)) out[name] = p && { x: p.x / ontoAspect, y: p.y };
+  return out;
+}
